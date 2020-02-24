@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/harmony-one/harmony/internal/params"
@@ -652,18 +651,18 @@ func (pool *TxPool) local() map[common.Address]types.PoolTransactions {
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (pool *TxPool) validateTx(tx types.PoolTransaction, local bool) error {
 	// Heuristic limit, reject transactions over 32KB to prevent DOS attacks
-	if tx.Size() > 32*1024 {
-		return errors.WithMessagef(ErrOversizedData, "transaction size is %s", tx.Size().String())
-	}
+	//if tx.Size() > 32*1024 {
+	//	return errors.WithMessagef(ErrOversizedData, "transaction size is %s", tx.Size().String())
+	//}
 	// Transactions can't be negative. This may never happen using RLP decoded
 	// transactions but may occur if you create a transaction using the RPC.
 	if tx.Value().Sign() < 0 {
 		return errors.WithMessagef(ErrNegativeValue, "transaction value is %s", tx.Value().String())
 	}
 	// Ensure the transaction doesn't exceed the current block limit gas.
-	if pool.currentMaxGas < tx.Gas() {
-		return errors.WithMessagef(ErrGasLimit, "transaction gas is %d", tx.Gas())
-	}
+	//if pool.currentMaxGas < tx.Gas() {
+	//	return errors.WithMessagef(ErrGasLimit, "transaction gas is %d", tx.Gas())
+	//}
 	// Make sure the transaction is signed properly
 	from, err := types.PoolTransactionSender(pool.signer, tx)
 	if err != nil {
@@ -1254,7 +1253,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 	//	go pool.txFeed.Send(NewTxsEvent{promoted})
 	//}
 	// If the pending limit is overflown, start equalizing allowances
-	pending := uint64(0)
+	/*pending := uint64(0)
 	for _, list := range pool.pending {
 		pending += uint64(list.Len())
 	}
@@ -1325,7 +1324,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			}
 		}
 		pendingRateLimitCounter.Inc(int64(pendingBeforeCap - pending))
-	}
+	}*/
 	// If we've queued more transactions than the hard limit, drop oldest ones
 	queued := uint64(0)
 	for _, list := range pool.queue {

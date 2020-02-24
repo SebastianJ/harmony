@@ -16,6 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	stdLog "log"
+	"net/http"
+	_ "net/http/pprof"
+
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/harmony-one/bls/ffi/go/bls"
@@ -473,6 +477,10 @@ func main() {
 	// build time.
 	os.Setenv("GODEBUG", "netdns=go")
 
+	go func() {
+		stdLog.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	flag.Var(&p2putils.BootNodes, "bootnodes", "a list of bootnode multiaddress (delimited by ,)")
 	flag.Parse()
 
@@ -559,24 +567,6 @@ func main() {
 		os.Exit(1)
 	}
 	currentNode := setupConsensusAndNode(nodeConfig)
-
-	// Prepare for graceful shutdown from os signals
-	osSignal := make(chan os.Signal)
-	signal.Notify(osSignal, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		for {
-			select {
-			case sig := <-osSignal:
-				if sig == syscall.SIGTERM || sig == os.Interrupt {
-					msg := "Got %s signal. Gracefully shutting down...\n"
-					utils.Logger().Printf(msg, sig)
-					fmt.Printf(msg, sig)
-					currentNode.ShutDown()
-				}
-			}
-		}
-	}()
-
 	//setup state syncing and beacon syncing frequency
 	currentNode.SetSyncFreq(*syncFreq)
 	currentNode.SetBeaconSyncFreq(*beaconSyncFreq)
@@ -655,6 +645,21 @@ func main() {
 	if currentNode.NodeConfig.GetMetricsFlag() {
 		go currentNode.CollectMetrics()
 	}
+
+	// Prepare for graceful shutdown from os signals
+	osSignal := make(chan os.Signal)
+	signal.Notify(osSignal, os.Interrupt, os.Kill, syscall.SIGTERM)
+	go func() {
+		for {
+			select {
+			case sig := <-osSignal:
+				if sig == os.Kill || sig == syscall.SIGTERM || sig == os.Interrupt {
+					fmt.Printf("Got %s signal. Gracefully shutting down...\n", sig)
+					currentNode.ShutDown()
+				}
+			}
+		}
+	}()
 
 	currentNode.StartServer()
 }

@@ -253,9 +253,9 @@ var (
 
 // SanityCheck checks the basic requirements
 func (w *ValidatorWrapper) SanityCheck() error {
-	if err := w.Validator.SanityCheck(); err != nil {
+	/*if err := w.Validator.SanityCheck(); err != nil {
 		return err
-	}
+	}*/
 	// Self delegation must be >= MinSelfDelegation
 	switch len(w.Delegations) {
 	case 0:

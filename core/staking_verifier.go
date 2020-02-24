@@ -58,9 +58,9 @@ func VerifyAndCreateValidatorFromMsg(
 	wrapper.Snapshot.Epoch = epoch
 	wrapper.Snapshot.NumBlocksSigned = big.NewInt(0)
 	wrapper.Snapshot.NumBlocksToSign = big.NewInt(0)
-	if err := wrapper.SanityCheck(); err != nil {
+	/*if err := wrapper.SanityCheck(); err != nil {
 		return nil, err
-	}
+	}*/
 	return wrapper, nil
 }
 
@@ -110,9 +110,9 @@ func VerifyAndEditValidatorFromMsg(
 		return nil, errCommissionRateChangeTooFast
 	}
 
-	if err := wrapper.SanityCheck(); err != nil {
+	/*if err := wrapper.SanityCheck(); err != nil {
 		return nil, err
-	}
+	}*/
 	return wrapper, nil
 }
 
@@ -160,9 +160,9 @@ func VerifyAndDelegateFromMsg(
 				}
 				delegation.Undelegations = delegation.Undelegations[:i+1]
 				delegation.Amount.Add(delegation.Amount, msg.Amount)
-				if err := wrapper.SanityCheck(); err != nil {
+				/*if err := wrapper.SanityCheck(); err != nil {
 					return nil, nil, err
-				}
+				}*/
 				// Return remaining balance to be deducted for delegation
 				if delegateBalance.Cmp(big.NewInt(0)) < 0 {
 					return nil, nil, errInsufficientBalanceForStake // shouldn't really happen
@@ -183,9 +183,9 @@ func VerifyAndDelegateFromMsg(
 		return nil, nil, errInsufficientBalanceForStake
 	}
 	wrapper.Delegations = append(wrapper.Delegations, staking.NewDelegation(msg.DelegatorAddress, msg.Amount))
-	if err := wrapper.SanityCheck(); err != nil {
+	/*if err := wrapper.SanityCheck(); err != nil {
 		return nil, nil, err
-	}
+	}*/
 	return wrapper, msg.Amount, nil
 }
 
@@ -219,9 +219,9 @@ func VerifyAndUndelegateFromMsg(
 			if err := delegation.Undelegate(epoch, msg.Amount); err != nil {
 				return nil, err
 			}
-			if err := wrapper.SanityCheck(); err != nil {
+			/*if err := wrapper.SanityCheck(); err != nil {
 				return nil, err
-			}
+			}*/
 			return wrapper, nil
 		}
 	}
@@ -254,9 +254,9 @@ func VerifyAndCollectRewardsFromDelegation(
 			}
 			delegation.Reward.SetUint64(0)
 		}
-		if err := wrapper.SanityCheck(); err != nil {
+		/*if err := wrapper.SanityCheck(); err != nil {
 			return nil, nil, err
-		}
+		}*/
 		updatedValidatorWrappers = append(updatedValidatorWrappers, wrapper)
 	}
 	if totalRewards.Int64() == 0 {
