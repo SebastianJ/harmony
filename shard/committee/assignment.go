@@ -130,12 +130,12 @@ func eposStakedCommittee(
 			return nil, err
 		}
 
-		if err := validator.SanityCheck(); err != nil {
+		/*if err := validator.SanityCheck(); err != nil {
 			utils.Logger().Error().
 				Str("failure", validator.String()).
 				Msg("Sanity check of validator failed")
 			continue
-		}
+		}*/
 		validatorStake := big.NewInt(0)
 		for _, delegation := range validator.Delegations {
 			validatorStake.Add(validatorStake, delegation.Amount)
