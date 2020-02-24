@@ -703,7 +703,7 @@ func (pool *TxPool) validateTx(tx types.PoolTransaction, local bool) error {
 	if pool.currentState.GetBalance(from).Cmp(tx.Cost()) < 0 {
 		return ErrInsufficientFunds
 	}
-	intrGas := uint64(0)
+	/*intrGas := uint64(0)
 	stakingTx, isStakingTx := tx.(*staking.StakingTransaction)
 	if isStakingTx {
 		intrGas, err = IntrinsicGas(tx.Data(), false, pool.homestead, stakingTx.StakingType() == staking.DirectiveCreateValidator)
@@ -719,7 +719,7 @@ func (pool *TxPool) validateTx(tx types.PoolTransaction, local bool) error {
 	// Do more checks if it is a staking transaction
 	if isStakingTx {
 		return pool.validateStakingTx(stakingTx)
-	}
+	}*/
 	return nil
 }
 
