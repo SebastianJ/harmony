@@ -30,7 +30,7 @@ func constructAnnounceMessage(t *testing.T) (*NetworkMessage, error) {
 		t.Fatalf("Cannot create consensus: %v", err)
 	}
 	consensus.blockHash = [32]byte{}
-	return consensus.construct(msg_pb.MessageType_ANNOUNCE, nil, blsPriKey.GetPublicKey(), blsPriKey)
+	return consensus.construct(msg_pb.MessageType_ANNOUNCE, nil, nil, blsPriKey.GetPublicKey(), blsPriKey)
 }
 
 func getConsensusMessage(payload []byte) (*msg_pb.Message, error) {

@@ -21,7 +21,7 @@ func (consensus *Consensus) didReachPrepareQuorum() error {
 	}
 	// Construct and broadcast prepared message
 	networkMessage, err := consensus.construct(
-		msg_pb.MessageType_PREPARED, nil, consensus.LeaderPubKey, leaderPriKey,
+		msg_pb.MessageType_PREPARED, nil, nil, consensus.LeaderPubKey, leaderPriKey,
 	)
 	if err != nil {
 		consensus.getLogger().Err(err).

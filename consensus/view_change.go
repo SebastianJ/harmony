@@ -528,6 +528,7 @@ func (consensus *Consensus) onNewView(msg *msg_pb.Message) {
 			network, err := consensus.construct(
 				msg_pb.MessageType_COMMIT,
 				append(blockNumHash, consensus.blockHash[:]...),
+				consensus.blockHash[:],
 				key, consensus.priKey.PrivateKey[i],
 			)
 			if err != nil {

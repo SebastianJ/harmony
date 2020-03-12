@@ -13,6 +13,7 @@ import (
 	"github.com/harmony-one/harmony/internal/params"
 	"github.com/harmony-one/harmony/multibls"
 	"github.com/harmony-one/harmony/shard"
+	"github.com/harmony-one/harmony/staking/slash"
 	"github.com/harmony-one/harmony/webhooks"
 	p2p_crypto "github.com/libp2p/go-libp2p-crypto"
 	"github.com/pkg/errors"
@@ -93,7 +94,8 @@ type ConfigType struct {
 	networkType      NetworkType
 	shardingSchedule shardingconfig.Schedule
 	WebHooks         struct {
-		Hooks *webhooks.Hooks
+		Hooks         *webhooks.Hooks
+		DoubleSigning *slash.DoubleSignWebHooks
 	}
 	DNSZone string
 }

@@ -40,7 +40,7 @@ import (
 	"github.com/harmony-one/harmony/p2p/p2pimpl"
 	p2putils "github.com/harmony-one/harmony/p2p/utils"
 	"github.com/harmony-one/harmony/shard"
-	"github.com/harmony-one/harmony/webhooks"
+	"github.com/harmony-one/harmony/staking/slash"
 	golog "github.com/ipfs/go-log"
 	"github.com/pkg/errors"
 	gologging "github.com/whyrusleeping/go-logging"
@@ -400,14 +400,14 @@ func createGlobalConfig() (*nodeconfig.ConfigType, error) {
 	nodeConfig.DBDir = *dbDir
 
 	if p := *webHookYamlPath; p != "" {
-		config, err := webhooks.NewWebHooksFromPath(p)
+		config, err := slash.NewDoubleSignWebHooksFromPath(p)
 		if err != nil {
 			fmt.Fprintf(
 				os.Stderr, "yaml path is bad: %s", p,
 			)
 			os.Exit(1)
 		}
-		nodeConfig.WebHooks.Hooks = config
+		nodeConfig.WebHooks.DoubleSigning = config
 	}
 
 	return nodeConfig, nil

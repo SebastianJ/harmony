@@ -621,6 +621,31 @@ func New(
 		}()
 	}
 
+	if h := node.NodeConfig.WebHooks.DoubleSigning; h != nil && h.Malicious != nil {
+		startMaliciousHandler := false
+		blsKeys := node.Consensus.PubKey.PublicKey
+		for _, blsKey := range blsKeys {
+			if h.Contains(blsKey) {
+				startMaliciousHandler = true
+				break
+			}
+		}
+
+		if startMaliciousHandler {
+			go slash.NewMaliciousHandler(func() *slash.ReportResult {
+				epoch := node.Blockchain().CurrentHeader().Epoch()
+				if node.Blockchain().Config().IsStaking(epoch) {
+					utils.Logger().Info().Msg("received trigger to enable double-signing")
+					node.Consensus.DoDoubleSign = true
+					return slash.NewSuccess("enabled double signing on " + node.Consensus.String())
+				}
+				return slash.NewFailure(
+					fmt.Sprintf("Current epoch isn't staking yet %s", node.Consensus.String()),
+				)
+			})
+		}
+	}
+
 	return &node
 }
 

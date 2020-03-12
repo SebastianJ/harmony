@@ -127,6 +127,7 @@ options:
    -B blacklist   specify file containing blacklisted accounts as a newline delimited file (default: ./.hmy/blacklist.txt)
    -R address     start a pprof profiling server listening on the specified address
    -I             use statically linked Harmony binary
+   -W path        specify a webhooks file to use for testing double-signing
 
 examples:
 
@@ -187,6 +188,7 @@ staking_mode=false
 multi_key=false
 archival=false
 blacklist=./.hmy/blacklist.txt
+webhooks=""
 pprof=""
 static=false
 verify=false
@@ -194,7 +196,7 @@ ${BLSKEYFILE=}
 
 unset OPTIND OPTARG opt
 OPTIND=1
-while getopts :1chk:sSp:dDmN:tT:i:ba:U:PvVyzn:MAIB:R:Y opt
+while getopts :1chk:sSp:dDmN:tT:i:ba:U:PvVyzn:MAIB:R:W:Y opt
 do
    case "${opt}" in
    '?') usage "unrecognized option -${OPTARG}";;
@@ -222,6 +224,7 @@ do
    P) public_rpc=true;;
    B) blacklist="${OPTARG}";;
    R) pprof="${OPTARG}";;
+   W) webhooks="${OPTARG}";;
    v) msg "version: $version"
       exit 0 ;;
    V) LD_LIBRARY_PATH=. ./harmony -version
@@ -747,6 +750,11 @@ do
    args+=(
       -is_archival="${archival}"
    )
+   if [ ! -z "$webhooks" ]; then
+   args+=(
+      -webhook_yaml="${webhooks}"
+   )
+   fi
    if ! ${multi_key}; then
       args+=(
       -blskey_file "${BLSKEYFILE}"

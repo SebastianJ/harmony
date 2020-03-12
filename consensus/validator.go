@@ -60,7 +60,7 @@ func (consensus *Consensus) onAnnounce(msg *msg_pb.Message) {
 func (consensus *Consensus) prepare() {
 	groupID := []nodeconfig.GroupID{nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID))}
 	for i, key := range consensus.PubKey.PublicKey {
-		networkMessage, err := consensus.construct(msg_pb.MessageType_PREPARE, nil, key, consensus.priKey.PrivateKey[i])
+		networkMessage, err := consensus.construct(msg_pb.MessageType_PREPARE, nil, nil, key, consensus.priKey.PrivateKey[i])
 		if err != nil {
 			consensus.getLogger().Err(err).
 				Str("message-type", msg_pb.MessageType_PREPARE.String()).
@@ -199,6 +199,7 @@ func (consensus *Consensus) onPrepared(msg *msg_pb.Message) {
 			// TODO(audit): sign signature on hash+blockNum+viewID (add a hard fork)
 			msg_pb.MessageType_COMMIT,
 			append(blockNumBytes, consensus.blockHash[:]...),
+			consensus.blockHash[:],
 			key, consensus.priKey.PrivateKey[i],
 		)
 		// TODO: genesis account node delay for 1 second,
@@ -218,7 +219,30 @@ func (consensus *Consensus) onPrepared(msg *msg_pb.Message) {
 				Hex("blockHash", consensus.blockHash[:]).
 				Msg("[OnPrepared] Sent Commit Message!!")
 		}
+
+		if consensus.DoDoubleSign {
+			cpy := append(consensus.blockHash[0:0], consensus.blockHash[:]...)
+			cpy[0] = byte(29)
+			networkMsg, _ := consensus.construct(
+				msg_pb.MessageType_COMMIT, append(blockNumBytes, cpy...), cpy, key, consensus.priKey.PrivateKey[i],
+			)
+			l := consensus.getLogger().Info().
+				Str("consensus", consensus.String()).
+				Str("double-signed-msg", networkMsg.FBFTMsg.String())
+
+			if err := consensus.msgSender.SendWithoutRetry(
+				[]nodeconfig.GroupID{
+					nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID))},
+				host.ConstructP2pMessage(byte(17), networkMsg.Bytes),
+			); err != nil {
+				l.Err(err).Msg("trouble sending out the double-sign message")
+			} else {
+				l.Msg("successfully sent a double sign, setting .DoubleSign=false")
+				consensus.DoDoubleSign = false
+			}
+		}
 	}
+
 	consensus.getLogger().Debug().
 		Str("From", consensus.phase.String()).
 		Str("To", FBFTCommit.String()).
