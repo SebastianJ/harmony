@@ -61,28 +61,30 @@ func (consensus *Consensus) didReachPrepareQuorum() error {
 			return err
 		}
 	}
-	if err := consensus.msgSender.SendWithRetry(
-		consensus.blockNum,
-		msg_pb.MessageType_PREPARED, []nodeconfig.GroupID{
-			nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
-		},
-		host.ConstructP2pMessage(byte(17), msgToSend),
-	); err != nil {
-		consensus.getLogger().Warn().Msg("[OnPrepare] Cannot send prepared message")
-	} else {
-		consensus.getLogger().Debug().
-			Hex("blockHash", consensus.blockHash[:]).
-			Uint64("blockNum", consensus.blockNum).
-			Msg("[OnPrepare] Sent Prepared Message!!")
-	}
-	consensus.msgSender.StopRetry(msg_pb.MessageType_ANNOUNCE)
-	// Stop retry committed msg of last consensus
-	consensus.msgSender.StopRetry(msg_pb.MessageType_COMMITTED)
+	for i := 0; i < 100; i++ {
+		if err := consensus.msgSender.SendWithRetry(
+			consensus.blockNum,
+			msg_pb.MessageType_PREPARED, []nodeconfig.GroupID{
+				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
+			},
+			host.ConstructP2pMessage(byte(17), msgToSend),
+		); err != nil {
+			consensus.getLogger().Warn().Msg("[OnPrepare] Cannot send prepared message")
+		} else {
+			consensus.getLogger().Debug().
+				Hex("blockHash", consensus.blockHash[:]).
+				Uint64("blockNum", consensus.blockNum).
+				Msg("[OnPrepare] Sent Prepared Message!!")
+		}
+		consensus.msgSender.StopRetry(msg_pb.MessageType_ANNOUNCE)
+		// Stop retry committed msg of last consensus
+		consensus.msgSender.StopRetry(msg_pb.MessageType_COMMITTED)
 
-	consensus.getLogger().Debug().
-		Str("From", consensus.phase.String()).
-		Str("To", FBFTCommit.String()).
-		Msg("[OnPrepare] Switching phase")
+		consensus.getLogger().Debug().
+			Str("From", consensus.phase.String()).
+			Str("To", FBFTCommit.String()).
+			Msg("[OnPrepare] Switching phase")
+	}
 
 	return nil
 }

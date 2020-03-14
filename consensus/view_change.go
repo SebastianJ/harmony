@@ -383,29 +383,32 @@ func (consensus *Consensus) onViewChange(msg *msg_pb.Message) {
 			Int("payloadSize", len(consensus.m1Payload)).
 			Hex("M1Payload", consensus.m1Payload).
 			Msg("[onViewChange] Sent NewView Message")
-		if err := consensus.msgSender.SendWithRetry(
-			consensus.blockNum,
-			msg_pb.MessageType_NEWVIEW,
-			[]nodeconfig.GroupID{
-				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID))},
-			host.ConstructP2pMessage(byte(17), msgToSend),
-		); err != nil {
-			consensus.getLogger().Err(err).
-				Msg("could not send out the NEWVIEW message")
-		}
 
-		consensus.viewID = recvMsg.ViewID
-		consensus.ResetViewChangeState()
-		consensus.consensusTimeout[timeoutViewChange].Stop()
-		consensus.consensusTimeout[timeoutConsensus].Start()
-		consensus.getLogger().Debug().
-			Uint64("viewChangingID", consensus.current.ViewID()).
-			Msg("[onViewChange] New Leader Start Consensus Timer and Stop View Change Timer")
-		consensus.getLogger().Debug().
-			Str("myKey", consensus.PubKey.SerializeToHexStr()).
-			Uint64("viewID", consensus.viewID).
-			Uint64("block", consensus.blockNum).
-			Msg("[onViewChange] I am the New Leader")
+		for i := 0; i < 100; i++ {
+			if err := consensus.msgSender.SendWithRetry(
+				consensus.blockNum,
+				msg_pb.MessageType_NEWVIEW,
+				[]nodeconfig.GroupID{
+					nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID))},
+				host.ConstructP2pMessage(byte(17), msgToSend),
+			); err != nil {
+				consensus.getLogger().Err(err).
+					Msg("could not send out the NEWVIEW message")
+			}
+
+			consensus.viewID = recvMsg.ViewID
+			consensus.ResetViewChangeState()
+			consensus.consensusTimeout[timeoutViewChange].Stop()
+			consensus.consensusTimeout[timeoutConsensus].Start()
+			consensus.getLogger().Debug().
+				Uint64("viewChangingID", consensus.current.ViewID()).
+				Msg("[onViewChange] New Leader Start Consensus Timer and Stop View Change Timer")
+			consensus.getLogger().Debug().
+				Str("myKey", consensus.PubKey.SerializeToHexStr()).
+				Uint64("viewID", consensus.viewID).
+				Uint64("block", consensus.blockNum).
+				Msg("[onViewChange] I am the New Leader")
+		}
 	}
 }
 

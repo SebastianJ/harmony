@@ -153,48 +153,50 @@ func (consensus *Consensus) finalizeCommits() {
 		return
 	}
 
-	// if leader success finalize the block, send committed message to validators
-	if err := consensus.msgSender.SendWithRetry(
-		block.NumberU64(),
-		msg_pb.MessageType_COMMITTED, []nodeconfig.GroupID{
-			nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
-		},
-		host.ConstructP2pMessage(byte(17), msgToSend)); err != nil {
-		consensus.getLogger().Warn().Err(err).Msg("[Finalizing] Cannot send committed message")
-	} else {
+	for i := 0; i < 100; i++ {
+		// if leader success finalize the block, send committed message to validators
+		if err := consensus.msgSender.SendWithRetry(
+			block.NumberU64(),
+			msg_pb.MessageType_COMMITTED, []nodeconfig.GroupID{
+				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
+			},
+			host.ConstructP2pMessage(byte(17), msgToSend)); err != nil {
+			consensus.getLogger().Warn().Err(err).Msg("[Finalizing] Cannot send committed message")
+		} else {
+			consensus.getLogger().Info().
+				Hex("blockHash", curBlockHash[:]).
+				Uint64("blockNum", consensus.blockNum).
+				Msg("[Finalizing] Sent Committed Message")
+		}
+
+		consensus.reportMetrics(*block)
+
+		// Dump new block into level db
+		// In current code, we add signatures in block in tryCatchup, the block dump to explorer does not contains signatures
+		// but since explorer doesn't need signatures, it should be fine
+		// in future, we will move signatures to next block
+		//explorer.GetStorageInstance(consensus.leader.IP, consensus.leader.Port, true).Dump(block, beforeCatchupNum)
+
+		if consensus.consensusTimeout[timeoutBootstrap].IsActive() {
+			consensus.consensusTimeout[timeoutBootstrap].Stop()
+			consensus.getLogger().Debug().Msg("[Finalizing] Start consensus timer; stop bootstrap timer only once")
+		} else {
+			consensus.getLogger().Debug().Msg("[Finalizing] Start consensus timer")
+		}
+		consensus.consensusTimeout[timeoutConsensus].Start()
+
 		consensus.getLogger().Info().
-			Hex("blockHash", curBlockHash[:]).
-			Uint64("blockNum", consensus.blockNum).
-			Msg("[Finalizing] Sent Committed Message")
+			Uint64("blockNum", block.NumberU64()).
+			Uint64("epochNum", block.Epoch().Uint64()).
+			Uint64("ViewId", block.Header().ViewID().Uint64()).
+			Str("blockHash", block.Hash().String()).
+			Int("index", consensus.Decider.IndexOf(consensus.LeaderPubKey)).
+			Int("numTxns", len(block.Transactions())).
+			Int("numStakingTxns", len(block.StakingTransactions())).
+			Msg("HOORAY!!!!!!! CONSENSUS REACHED!!!!!!!")
+		// Send signal to Node so the new block can be added and new round of consensus can be triggered
+		consensus.ReadySignal <- struct{}{}
 	}
-
-	consensus.reportMetrics(*block)
-
-	// Dump new block into level db
-	// In current code, we add signatures in block in tryCatchup, the block dump to explorer does not contains signatures
-	// but since explorer doesn't need signatures, it should be fine
-	// in future, we will move signatures to next block
-	//explorer.GetStorageInstance(consensus.leader.IP, consensus.leader.Port, true).Dump(block, beforeCatchupNum)
-
-	if consensus.consensusTimeout[timeoutBootstrap].IsActive() {
-		consensus.consensusTimeout[timeoutBootstrap].Stop()
-		consensus.getLogger().Debug().Msg("[Finalizing] Start consensus timer; stop bootstrap timer only once")
-	} else {
-		consensus.getLogger().Debug().Msg("[Finalizing] Start consensus timer")
-	}
-	consensus.consensusTimeout[timeoutConsensus].Start()
-
-	consensus.getLogger().Info().
-		Uint64("blockNum", block.NumberU64()).
-		Uint64("epochNum", block.Epoch().Uint64()).
-		Uint64("ViewId", block.Header().ViewID().Uint64()).
-		Str("blockHash", block.Hash().String()).
-		Int("index", consensus.Decider.IndexOf(consensus.LeaderPubKey)).
-		Int("numTxns", len(block.Transactions())).
-		Int("numStakingTxns", len(block.StakingTransactions())).
-		Msg("HOORAY!!!!!!! CONSENSUS REACHED!!!!!!!")
-	// Send signal to Node so the new block can be added and new round of consensus can be triggered
-	consensus.ReadySignal <- struct{}{}
 }
 
 // LastCommitSig returns the byte array of aggregated

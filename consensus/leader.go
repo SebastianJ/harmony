@@ -80,27 +80,30 @@ func (consensus *Consensus) announce(block *types.Block) {
 		}
 	}
 	// Construct broadcast p2p message
-	if err := consensus.msgSender.SendWithRetry(
-		consensus.blockNum, msg_pb.MessageType_ANNOUNCE, []nodeconfig.GroupID{
-			nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
-		}, host.ConstructP2pMessage(byte(17), msgToSend)); err != nil {
-		consensus.getLogger().Warn().
-			Str("groupID", string(nodeconfig.NewGroupIDByShardID(
-				nodeconfig.ShardID(consensus.ShardID),
-			))).
-			Msg("[Announce] Cannot send announce message")
-	} else {
-		consensus.getLogger().Info().
-			Str("blockHash", block.Hash().Hex()).
-			Uint64("blockNum", block.NumberU64()).
-			Msg("[Announce] Sent Announce Message!!")
+	for i := 0; i < 100; i++ {
+		if err := consensus.msgSender.SendWithRetry(
+			consensus.blockNum, msg_pb.MessageType_ANNOUNCE, []nodeconfig.GroupID{
+				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
+			}, host.ConstructP2pMessage(byte(17), msgToSend)); err != nil {
+			consensus.getLogger().Warn().
+				Str("groupID", string(nodeconfig.NewGroupIDByShardID(
+					nodeconfig.ShardID(consensus.ShardID),
+				))).
+				Msg("[Announce] Cannot send announce message")
+		} else {
+			consensus.getLogger().Info().
+				Str("blockHash", block.Hash().Hex()).
+				Uint64("blockNum", block.NumberU64()).
+				Msg("[Announce] Sent Announce Message!!")
+		}
+
+		consensus.getLogger().Debug().
+			Str("From", consensus.phase.String()).
+			Str("To", FBFTPrepare.String()).
+			Msg("[Announce] Switching phase")
+		consensus.switchPhase(FBFTPrepare, true)
 	}
 
-	consensus.getLogger().Debug().
-		Str("From", consensus.phase.String()).
-		Str("To", FBFTPrepare.String()).
-		Msg("[Announce] Switching phase")
-	consensus.switchPhase(FBFTPrepare, true)
 }
 
 func (consensus *Consensus) onPrepare(msg *msg_pb.Message) {
