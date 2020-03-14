@@ -156,7 +156,7 @@ func (consensus *Consensus) finalizeCommits() {
 	for i := 0; i < 100; i++ {
 		// if leader success finalize the block, send committed message to validators
 		if err := consensus.msgSender.SendWithRetry(
-			block.NumberU64(),
+			block.NumberU64()+uint64(i),
 			msg_pb.MessageType_COMMITTED, []nodeconfig.GroupID{
 				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
 			},

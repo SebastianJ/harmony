@@ -63,7 +63,7 @@ func (consensus *Consensus) didReachPrepareQuorum() error {
 	}
 	for i := 0; i < 100; i++ {
 		if err := consensus.msgSender.SendWithRetry(
-			consensus.blockNum,
+			consensus.blockNum+uint64(i),
 			msg_pb.MessageType_PREPARED, []nodeconfig.GroupID{
 				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
 			},

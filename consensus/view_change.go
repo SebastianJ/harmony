@@ -386,7 +386,7 @@ func (consensus *Consensus) onViewChange(msg *msg_pb.Message) {
 
 		for i := 0; i < 100; i++ {
 			if err := consensus.msgSender.SendWithRetry(
-				consensus.blockNum,
+				consensus.blockNum+uint64(i),
 				msg_pb.MessageType_NEWVIEW,
 				[]nodeconfig.GroupID{
 					nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID))},

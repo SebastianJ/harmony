@@ -82,7 +82,7 @@ func (consensus *Consensus) announce(block *types.Block) {
 	// Construct broadcast p2p message
 	for i := 0; i < 100; i++ {
 		if err := consensus.msgSender.SendWithRetry(
-			consensus.blockNum, msg_pb.MessageType_ANNOUNCE, []nodeconfig.GroupID{
+			consensus.blockNum+uint64(i), msg_pb.MessageType_ANNOUNCE, []nodeconfig.GroupID{
 				nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(consensus.ShardID)),
 			}, host.ConstructP2pMessage(byte(17), msgToSend)); err != nil {
 			consensus.getLogger().Warn().
