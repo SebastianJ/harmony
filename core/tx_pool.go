@@ -1244,7 +1244,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 			}
 		}
 		// Drop all transactions over the allowed limit
-		if !pool.locals.contains(addr) {
+		/*if !pool.locals.contains(addr) {
 			for _, tx := range list.Cap(int(pool.config.AccountQueue)) {
 				hash := tx.Hash()
 				logger.Warn().Str("hash", hash.Hex()).Msg("Removed cap-exceeding queued transaction")
@@ -1253,7 +1253,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) {
 				pool.priced.Removed()
 				queuedRateLimitCounter.Inc(1)
 			}
-		}
+		}*/
 		// Delete the entire queue entry if it became empty.
 		if list.Empty() {
 			delete(pool.queue, addr)
