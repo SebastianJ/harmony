@@ -856,13 +856,13 @@ func (pool *TxPool) add(tx types.PoolTransaction, local bool) (bool, error) {
 		return false, errors.WithMessagef(ErrKnownTransaction, "transaction hash %x", hash)
 	}
 	// If the transaction fails basic validation, discard it
-	if err := pool.validateTx(tx, local); err != nil {
+	/*if err := pool.validateTx(tx, local); err != nil {
 		logger.Warn().Err(err).Str("hash", hash.Hex()).Msg("Discarding invalid transaction")
 		invalidTxCounter.Inc(1)
 		return false, err
-	}
+	}*/
 	// If the transaction pool is full, discard underpriced transactions
-	if uint64(pool.all.Count()) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
+	/*if uint64(pool.all.Count()) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
 		// If the new transaction is underpriced, don't accept it
 		if !local && pool.priced.Underpriced(tx, pool.locals) {
 			gasPrice := new(big.Float).SetInt64(tx.GasPrice().Int64())
@@ -884,7 +884,7 @@ func (pool *TxPool) add(tx types.PoolTransaction, local bool) (bool, error) {
 			underpricedTxCounter.Inc(1)
 			pool.removeTx(tx.Hash(), false)
 		}
-	}
+	}*/
 	// If the transaction is replacing an already pending one, do directly
 	from, _ := types.PoolTransactionSender(pool.signer, tx) // already validated
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
