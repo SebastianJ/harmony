@@ -3,6 +3,8 @@ package shardingconfig
 import (
 	"math/big"
 
+	"github.com/harmony-one/harmony/numeric"
+
 	"github.com/harmony-one/harmony/internal/genesis"
 	"github.com/harmony-one/harmony/internal/params"
 )
@@ -14,8 +16,8 @@ var TestnetSchedule testnetSchedule
 type testnetSchedule struct{}
 
 const (
-	// 10 minutes per epoch (at 8s/block)
-	testnetBlocksPerEpoch = 75
+	// ~304 sec epochs for P2 of open staking
+	testnetBlocksPerEpoch = 38
 
 	testnetVdfDifficulty = 10000 // This takes about 20s to finish the vdf
 
@@ -80,5 +82,5 @@ var testnetReshardingEpoch = []*big.Int{
 	params.TestnetChainConfig.StakingEpoch,
 }
 
-var testnetV0 = MustNewInstance(4, 25, 25, genesis.TNHarmonyAccounts, genesis.TNFoundationalAccounts, testnetReshardingEpoch, TestnetSchedule.BlocksPerEpoch())
-var testnetV1 = MustNewInstance(4, 50, 25, genesis.TNHarmonyAccounts, genesis.TNFoundationalAccounts, testnetReshardingEpoch, TestnetSchedule.BlocksPerEpoch())
+var testnetV0 = MustNewInstance(4, 25, 25, numeric.OneDec(), genesis.TNHarmonyAccounts, genesis.TNFoundationalAccounts, testnetReshardingEpoch, TestnetSchedule.BlocksPerEpoch())
+var testnetV1 = MustNewInstance(4, 50, 25, numeric.MustNewDecFromStr("0.68"), genesis.TNHarmonyAccounts, genesis.TNFoundationalAccounts, testnetReshardingEpoch, TestnetSchedule.BlocksPerEpoch())

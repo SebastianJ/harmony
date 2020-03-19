@@ -476,7 +476,7 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 
 	// Only happens once, the flip-over to a new Decider policy
 	if isFirstTimeStaking || haventUpdatedDecider {
-		decider := quorum.NewDecider(quorum.SuperMajorityStake)
+		decider := quorum.NewDecider(quorum.SuperMajorityStake, consensus.ShardID)
 		decider.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
 			return consensus.PubKey, nil
 		})
@@ -484,6 +484,7 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 	}
 
 	committeeToSet := &shard.Committee{}
+	epochToSet := curEpoch
 	hasError := false
 
 	curShardState, err := committee.WithStakingEnabled.ReadFromDB(
@@ -526,7 +527,7 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 		}
 
 		committeeToSet = subComm
-
+		epochToSet = nextEpoch
 	} else {
 		consensus.SetEpochNum(curEpoch.Uint64())
 		subComm, err := curShardState.FindCommitteeByID(curHeader.ShardID())
@@ -549,9 +550,8 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 
 	// update public keys in the committee
 	oldLeader := consensus.LeaderPubKey
-	pubKeys, _ := committee.WithStakingEnabled.GetCommitteePublicKeys(
-		committeeToSet,
-	)
+	pubKeys, _ := committeeToSet.BLSPublicKeys()
+
 	consensus.getLogger().Info().
 		Int("numPubKeys", len(pubKeys)).
 		Msg("[UpdateConsensusInformation] Successfully updated public keys")
@@ -559,7 +559,7 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 
 	// Update voters in the committee
 	if _, err := consensus.Decider.SetVoters(
-		committeeToSet.Slots,
+		committeeToSet, epochToSet,
 	); err != nil {
 		utils.Logger().Error().
 			Err(err).

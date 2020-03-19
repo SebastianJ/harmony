@@ -2,6 +2,7 @@ package verify
 
 import (
 	"encoding/binary"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/harmony-one/bls/ffi/go/bls"
@@ -23,6 +24,7 @@ func AggregateSigForCommittee(
 	aggSignature *bls.Sign,
 	hash common.Hash,
 	blockNum uint64,
+	epoch *big.Int,
 	bitmap []byte,
 ) error {
 	committerKeys, err := committee.BLSPublicKeys()
@@ -37,11 +39,13 @@ func AggregateSigForCommittee(
 		return err
 	}
 
-	decider := quorum.NewDecider(quorum.SuperMajorityStake)
+	decider := quorum.NewDecider(
+		quorum.SuperMajorityStake, committee.ShardID,
+	)
 	decider.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
 		return nil, nil
 	})
-	if _, err := decider.SetVoters(committee.Slots); err != nil {
+	if _, err := decider.SetVoters(committee, epoch); err != nil {
 		return err
 	}
 	if !decider.IsQuorumAchievedByMask(mask) {

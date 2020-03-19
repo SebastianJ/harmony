@@ -3,7 +3,8 @@ package chain
 import (
 	"bytes"
 	"encoding/binary"
-	"math/big"
+
+	"github.com/harmony-one/harmony/staking/availability"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -27,22 +28,11 @@ import (
 )
 
 type engineImpl struct {
-	d      reward.Distributor
 	beacon engine.ChainReader
 }
 
 // Engine is an algorithm-agnostic consensus engine.
-var Engine = &engineImpl{nil, nil}
-
-// Rewarder handles the distribution of block rewards
-func (e *engineImpl) Rewarder() reward.Distributor {
-	return e.d
-}
-
-// SetRewarder ..
-func (e *engineImpl) SetRewarder(d reward.Distributor) {
-	e.d = d
-}
+var Engine = &engineImpl{nil}
 
 func (e *engineImpl) Beaconchain() engine.ChainReader {
 	return e.beacon
@@ -208,17 +198,21 @@ func (e *engineImpl) VerifySeal(chain engine.ChainReader, header *block.Header) 
 		if err != nil {
 			return errors.Wrapf(err, "cannot decoded shard state")
 		}
-
-		// TODO(audit): reuse a singleton decider and not recreate it for every single block
-		d := quorum.NewDecider(quorum.SuperMajorityStake)
-		d.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
-			return nil, nil
-		})
 		subComm, err := slotList.FindCommitteeByID(parentHeader.ShardID())
 		if err != nil {
 			return err
 		}
-		d.SetVoters(subComm.Slots)
+		// TODO(audit): reuse a singleton decider and not recreate it for every single block
+		d := quorum.NewDecider(
+			quorum.SuperMajorityStake, subComm.ShardID,
+		)
+		d.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
+			return nil, nil
+		})
+
+		if _, err := d.SetVoters(subComm, slotList.Epoch); err != nil {
+			return err
+		}
 		if !d.IsQuorumAchievedByMask(mask) {
 			return ctxerror.New(
 				"[VerifySeal] Not enough voting power in LastCommitSignature from Block Header",
@@ -258,13 +252,13 @@ func (e *engineImpl) Finalize(
 	chain engine.ChainReader, header *block.Header,
 	state *state.DB, txs []*types.Transaction,
 	receipts []*types.Receipt, outcxs []*types.CXReceipt,
-	incxs []*types.CXReceiptsProof, stks []*staking.StakingTransaction,
+	incxs []*types.CXReceiptsProof, stks staking.StakingTransactions,
 	doubleSigners slash.Records,
-) (*types.Block, *big.Int, error) {
+) (*types.Block, reward.Reader, error) {
 	// Accumulate block rewards and commit the final state root
 	// Header seems complete, assemble into a block and return
 	payout, err := AccumulateRewards(
-		chain, state, header, e.Rewarder(), e.Beaconchain(),
+		chain, state, header, e.Beaconchain(),
 	)
 	if err != nil {
 		return nil, nil, ctxerror.New("cannot pay block reward").WithCause(err)
@@ -274,7 +268,7 @@ func (e *engineImpl) Finalize(
 	isNewEpoch := len(header.ShardState()) > 0
 	inStakingEra := chain.Config().IsStaking(header.Epoch())
 
-	// Process Undelegations and set LastEpochInCommittee
+	// Process Undelegations, set LastEpochInCommittee and set EPoS status
 	if isBeaconChain && isNewEpoch && inStakingEra {
 		if err := payoutUndelegations(chain, header, state); err != nil {
 			return nil, nil, err
@@ -282,6 +276,18 @@ func (e *engineImpl) Finalize(
 
 		if err := setLastEpochInCommittee(header, state); err != nil {
 			return nil, nil, err
+		}
+
+		curShardState, err := chain.ReadShardState(chain.CurrentBlock().Epoch())
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, addr := range curShardState.StakedValidators().Addrs {
+			if err := availability.ComputeAndMutateEPOSStatus(
+				chain, state, addr,
+			); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
@@ -303,6 +309,9 @@ func (e *engineImpl) Finalize(
 func payoutUndelegations(
 	chain engine.ChainReader, header *block.Header, state *state.DB,
 ) error {
+	utils.AnalysisStart("payoutUndelegations")
+	defer utils.AnalysisEnd("payoutUndelegations")
+
 	validators, err := chain.ReadValidatorList()
 	countTrack := map[common.Address]int{}
 	if err != nil {
@@ -455,16 +464,19 @@ func (e *engineImpl) VerifyHeaderWithSignature(chain engine.ChainReader, header 
 			return errors.Wrapf(err, "cannot read shard state")
 		}
 
-		// TODO(audit): reuse a singleton decider and not recreate it for every single block
-		d := quorum.NewDecider(quorum.SuperMajorityStake)
-		d.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
-			return nil, nil
-		})
 		subComm, err := slotList.FindCommitteeByID(header.ShardID())
 		if err != nil {
 			return err
 		}
-		d.SetVoters(subComm.Slots)
+		// TODO(audit): reuse a singleton decider and not recreate it for every single block
+		d := quorum.NewDecider(quorum.SuperMajorityStake, subComm.ShardID)
+		d.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
+			return nil, nil
+		})
+
+		if _, err := d.SetVoters(subComm, e); err != nil {
+			return err
+		}
 		if !d.IsQuorumAchievedByMask(mask) {
 			return ctxerror.New(
 				"[VerifySeal] Not enough voting power in commitSignature from Block Header",
