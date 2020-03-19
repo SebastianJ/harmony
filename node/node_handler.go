@@ -22,8 +22,10 @@ import (
 	"github.com/harmony-one/harmony/p2p"
 	"github.com/harmony-one/harmony/p2p/host"
 	"github.com/harmony-one/harmony/shard"
+	"github.com/harmony-one/harmony/staking/availability"
 	"github.com/harmony-one/harmony/staking/slash"
 	staking "github.com/harmony-one/harmony/staking/types"
+	"github.com/harmony-one/harmony/webhooks"
 	libp2p_peer "github.com/libp2p/go-libp2p-core/peer"
 )
 
@@ -242,8 +244,13 @@ func (node *Node) stakingMessageHandler(msgPayload []byte) {
 // TODO (lc): broadcast the new blocks to new nodes doing state sync
 func (node *Node) BroadcastNewBlock(newBlock *types.Block) {
 	groups := []nodeconfig.GroupID{node.NodeConfig.GetClientGroupID()}
-	utils.Logger().Info().Msgf("broadcasting new block %d, group %s", newBlock.NumberU64(), groups[0])
-	msg := host.ConstructP2pMessage(byte(0), proto_node.ConstructBlocksSyncMessage([]*types.Block{newBlock}))
+	utils.Logger().Info().
+		Msgf(
+			"broadcasting new block %d, group %s", newBlock.NumberU64(), groups[0],
+		)
+	msg := host.ConstructP2pMessage(byte(0),
+		proto_node.ConstructBlocksSyncMessage([]*types.Block{newBlock}),
+	)
 	if err := node.host.SendMessageToGroups(groups, msg); err != nil {
 		utils.Logger().Warn().Err(err).Msg("cannot broadcast new block")
 	}
@@ -261,9 +268,11 @@ func (node *Node) BroadcastSlash(witness *slash.Record) {
 			RawJSON("record", []byte(witness.String())).
 			Msg("could not send slash record to beaconchain")
 	}
+	utils.Logger().Info().Msg("broadcast the double sign record")
 }
 
-// BroadcastCrossLink is called by consensus leader to send the new header as cross link to beacon chain.
+// BroadcastCrossLink is called by consensus leader to
+// send the new header as cross link to beacon chain.
 func (node *Node) BroadcastCrossLink(newBlock *types.Block) {
 	// no point to broadcast the crosslink if we aren't even in the right epoch yet
 	if !node.Blockchain().Config().IsCrossLink(
@@ -328,9 +337,9 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 		utils.Logger().Error().
 			Str("blockHash", newBlock.Hash().Hex()).
 			Err(err).
-			Msg("cannot ValidateHeader for the new block")
+			Msg("[VerifyNewBlock] Cannot validate header for the new block")
 		return ctxerror.New(
-			"cannot ValidateHeader for the new block",
+			"[VerifyNewBlock] Cannot validate header for the new block",
 			"blockHash",
 			newBlock.Hash(),
 		).WithCause(err)
@@ -340,8 +349,8 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 		utils.Logger().Error().
 			Uint32("my shard ID", node.Blockchain().ShardID()).
 			Uint32("new block's shard ID", newBlock.ShardID()).
-			Msg("wrong shard ID")
-		return ctxerror.New("wrong shard ID",
+			Msg("[VerifyNewBlock] Wrong shard ID of the new block")
+		return ctxerror.New("[VerifyNewBlock] Wrong shard ID of the new block",
 			"my shard ID", node.Blockchain().ShardID(),
 			"new block's shard ID", newBlock.ShardID(),
 		)
@@ -353,14 +362,25 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 		utils.Logger().Error().
 			Str("blockHash", newBlock.Hash().Hex()).
 			Err(err).
-			Msg("cannot VerifyShardState for the new block")
+			Msg("[VerifyNewBlock] Cannot verify shard state for the new block")
 		return ctxerror.New(
-			"cannot VerifyShardState for the new block", "blockHash",
+			"[VerifyNewBlock] Cannot verify shard state for the new block", "blockHash",
 			newBlock.Hash(),
 		).WithCause(err)
 	}
 
 	if err := node.Blockchain().ValidateNewBlock(newBlock); err != nil {
+		if hooks := node.NodeConfig.WebHooks.Hooks; hooks != nil {
+			if p := hooks.ProtocolIssues; p != nil {
+				url := p.OnCannotCommit
+				go func() {
+					webhooks.DoPost(url, map[string]interface{}{
+						"bad-header": newBlock.Header(),
+						"reason":     err.Error(),
+					})
+				}()
+			}
+		}
 		utils.Logger().Error().
 			Str("blockHash", newBlock.Hash().Hex()).
 			Int("numTx", len(newBlock.Transactions())).
@@ -463,9 +483,31 @@ func (node *Node) PostConsensusProcessing(
 	if len(newBlock.Header().ShardState()) > 0 {
 		node.Consensus.UpdateConsensusInformation()
 	}
+	if h := node.NodeConfig.WebHooks.Hooks; h != nil {
+		if h.Availability != nil {
+			for _, addr := range node.Consensus.SelfAddresses {
+				wrapper, err := node.Beaconchain().ReadValidatorInformation(addr)
+				if err != nil {
+					return
+				}
+				snapshot, err := node.Beaconchain().ReadValidatorSnapshot(addr)
+				if err != nil {
+					return
+				}
+				computed := availability.ComputeCurrentSigning(
+					snapshot, wrapper,
+				)
+				computed.BlocksLeftInEpoch = shard.Schedule.BlocksPerEpoch() - computed.ToSign.Uint64()
 
-	// TODO chao: uncomment this after beacon syncing is stable
-	// node.Blockchain().UpdateCXReceiptsCheckpointsByBlock(newBlock)
+				if err != nil && computed.IsBelowThreshold {
+					url := h.Availability.OnDroppedBelowThreshold
+					go func() {
+						webhooks.DoPost(url, computed)
+					}()
+				}
+			}
+		}
+	}
 }
 
 func (node *Node) pingMessageHandler(msgPayload []byte, sender libp2p_peer.ID) int {

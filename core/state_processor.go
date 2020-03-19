@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/harmony-one/harmony/block"
 	consensus_engine "github.com/harmony-one/harmony/consensus/engine"
+	"github.com/harmony-one/harmony/consensus/reward"
 	"github.com/harmony-one/harmony/core/state"
 	"github.com/harmony-one/harmony/core/types"
 	"github.com/harmony-one/harmony/core/vm"
@@ -47,7 +48,9 @@ type StateProcessor struct {
 }
 
 // NewStateProcessor initialises a new StateProcessor.
-func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consensus_engine.Engine) *StateProcessor {
+func NewStateProcessor(
+	config *params.ChainConfig, bc *BlockChain, engine consensus_engine.Engine,
+) *StateProcessor {
 	return &StateProcessor{
 		config: config,
 		bc:     bc,
@@ -62,8 +65,11 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // Process returns the receipts and logs accumulated during the process and
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
-func (p *StateProcessor) Process(block *types.Block, statedb *state.DB, cfg vm.Config) (
-	types.Receipts, types.CXReceipts, []*types.Log, uint64, *big.Int, error,
+func (p *StateProcessor) Process(
+	block *types.Block, statedb *state.DB, cfg vm.Config,
+) (
+	types.Receipts, types.CXReceipts,
+	[]*types.Log, uint64, reward.Reader, error,
 ) {
 	var (
 		receipts types.Receipts
@@ -83,7 +89,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.DB, cfg vm.C
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
 		statedb.Prepare(tx.Hash(), block.Hash(), i)
-		receipt, cxReceipt, _, err := ApplyTransaction(p.config, p.bc, &beneficiary, gp, statedb, header, tx, usedGas, cfg)
+		receipt, cxReceipt, _, err := ApplyTransaction(
+			p.config, p.bc, &beneficiary, gp, statedb, header, tx, usedGas, cfg,
+		)
 		if err != nil {
 			return nil, nil, nil, 0, nil, err
 		}
@@ -94,12 +102,13 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.DB, cfg vm.C
 		allLogs = append(allLogs, receipt.Logs...)
 	}
 
-	// Iterate over staking transactions
+	// Iterate over and process the staking transactions
 	L := len(block.Transactions())
 	for i, tx := range block.StakingTransactions() {
 		statedb.Prepare(tx.Hash(), block.Hash(), i+L)
-		receipt, _, err :=
-			ApplyStakingTransaction(p.config, p.bc, &beneficiary, gp, statedb, header, tx, usedGas, cfg)
+		receipt, _, err := ApplyStakingTransaction(
+			p.config, p.bc, &beneficiary, gp, statedb, header, tx, usedGas, cfg,
+		)
 
 		if err != nil {
 			return nil, nil, nil, 0, nil, err
@@ -111,16 +120,20 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.DB, cfg vm.C
 	// incomingReceipts should always be processed
 	// after transactions (to be consistent with the block proposal)
 	for _, cx := range block.IncomingReceipts() {
-		err := ApplyIncomingReceipt(p.config, statedb, header, cx)
-		if err != nil {
-			return nil, nil, nil, 0, nil, ctxerror.New("cannot apply incoming receipts").WithCause(err)
+		if err := ApplyIncomingReceipt(
+			p.config, statedb, header, cx,
+		); err != nil {
+			return nil, nil,
+				nil, 0, nil, ctxerror.New("[Process] Cannot apply incoming receipts").WithCause(err)
 		}
 	}
 
 	slashes := slash.Records{}
 	if s := header.Slashes(); len(s) > 0 {
 		if err := rlp.DecodeBytes(s, &slashes); err != nil {
-			return nil, nil, nil, 0, nil, ctxerror.New("cannot finalize block").WithCause(err)
+			return nil, nil, nil, 0, nil, ctxerror.New(
+				"[Process] Cannot finalize block",
+			).WithCause(err)
 		}
 	}
 
@@ -130,7 +143,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.DB, cfg vm.C
 		receipts, outcxs, incxs, block.StakingTransactions(), slashes,
 	)
 	if err != nil {
-		return nil, nil, nil, 0, nil, ctxerror.New("cannot finalize block").WithCause(err)
+		return nil, nil, nil, 0, nil, ctxerror.New("[Process] Cannot finalize block").WithCause(err)
 	}
 
 	return receipts, outcxs, allLogs, *usedGas, payout, nil
@@ -247,11 +260,8 @@ func ApplyStakingTransaction(
 
 	// Apply the transaction to the current state (included in the env)
 	gas, err = ApplyStakingMessage(vmenv, msg, gp, bc)
-	utils.Logger().Info().Msgf("ApplyStakingMessage: usedGas: %v, err: %v, stakingTxn:", gas, err)
-
-	// even there is error, we charge it
 	if err != nil {
-		return nil, gas, err
+		return nil, 0, err
 	}
 
 	// Update the state with pending changes
@@ -266,6 +276,12 @@ func ApplyStakingTransaction(
 	receipt.TxHash = tx.Hash()
 	receipt.GasUsed = gas
 
+	// TODO(audit): add more log to staking txns; expose them in block explorer.
+	if config.IsReceiptLog(header.Epoch()) {
+		receipt.Logs = statedb.GetLogs(tx.Hash())
+		utils.Logger().Info().Interface("CollectReward", receipt.Logs)
+	}
+
 	return receipt, gas, nil
 }
 
@@ -279,7 +295,7 @@ func ApplyIncomingReceipt(config *params.ChainConfig, db *state.DB, header *bloc
 		if cx == nil || cx.To == nil { // should not happend
 			return ctxerror.New("ApplyIncomingReceipts: Invalid incomingReceipt!", "receipt", cx)
 		}
-		utils.Logger().Info().Msgf("ApplyIncomingReceipts: ADDING BALANCE %d", cx.Amount)
+		utils.Logger().Info().Interface("receipt", cx).Msgf("ApplyIncomingReceipts: ADDING BALANCE %d", cx.Amount)
 
 		if !db.Exist(*cx.To) {
 			db.CreateAccount(*cx.To)

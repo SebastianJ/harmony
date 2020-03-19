@@ -1,26 +1,36 @@
 package core
 
 import (
-	"errors"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/harmony-one/harmony/consensus/reward"
 	"github.com/harmony-one/harmony/core/rawdb"
 	"github.com/harmony-one/harmony/core/state"
 	"github.com/harmony-one/harmony/core/types"
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/shard"
+	"github.com/harmony-one/harmony/staking/slash"
+	"github.com/pkg/errors"
 )
 
 // CommitOffChainData write off chain data of a block onto db writer.
 func (bc *BlockChain) CommitOffChainData(
-	batch rawdb.DatabaseWriter, block *types.Block, receipts []*types.Receipt,
-	cxReceipts []*types.CXReceipt, payout *big.Int, state *state.DB, root common.Hash) (status WriteStatus, err error) {
-	//// Write receipts of the block
+	batch rawdb.DatabaseWriter,
+	block *types.Block,
+	receipts []*types.Receipt,
+	cxReceipts []*types.CXReceipt,
+	payout reward.Reader,
+	state *state.DB,
+) (status WriteStatus, err error) {
+	// Write receipts of the block
 	rawdb.WriteReceipts(batch, block.Hash(), block.NumberU64(), receipts)
-
-	//// Cross-shard txns
+	isBeaconChain := bc.CurrentHeader().ShardID() == shard.BeaconChainShardID
+	isStaking := bc.chainConfig.IsStaking(block.Epoch())
+	header := block.Header()
+	isNewEpoch := len(header.ShardState()) > 0
+	// Cross-shard txns
 	epoch := block.Header().Epoch()
 	if bc.chainConfig.HasCrossTxFields(block.Epoch()) {
 		shardingConfig := shard.Schedule.InstanceForEpoch(epoch)
@@ -31,9 +41,13 @@ func (bc *BlockChain) CommitOffChainData(
 			}
 
 			shardReceipts := types.CXReceipts(cxReceipts).GetToShardReceipts(uint32(i))
-			err := rawdb.WriteCXReceipts(batch, uint32(i), block.NumberU64(), block.Hash(), shardReceipts)
-			if err != nil {
-				utils.Logger().Error().Err(err).Interface("shardReceipts", shardReceipts).Int("toShardID", i).Msg("WriteCXReceipts cannot write into database")
+			if err := rawdb.WriteCXReceipts(
+				batch, uint32(i), block.NumberU64(), block.Hash(), shardReceipts,
+			); err != nil {
+				utils.Logger().Error().Err(err).
+					Interface("shardReceipts", shardReceipts).
+					Int("toShardID", i).
+					Msg("WriteCXReceipts cannot write into database")
 				return NonStatTy, err
 			}
 		}
@@ -41,9 +55,9 @@ func (bc *BlockChain) CommitOffChainData(
 		bc.WriteCXReceiptsProofSpent(batch, block.IncomingReceipts())
 	}
 
-	//// VRF + VDF
-	//check non zero VRF field in header and add to local db
-	//if len(block.Vrf()) > 0 {
+	// VRF + VDF
+	// check non zero VRF field in header and add to local db
+	// if len(block.Vrf()) > 0 {
 	//	vrfBlockNumbers, _ := bc.ReadEpochVrfBlockNums(block.Header().Epoch())
 	//	if (len(vrfBlockNumbers) > 0) && (vrfBlockNumbers[len(vrfBlockNumbers)-1] == block.NumberU64()) {
 	//		utils.Logger().Error().
@@ -75,9 +89,16 @@ func (bc *BlockChain) CommitOffChainData(
 	//	}
 	//}
 
-	//// Shard State and Validator Update
-	header := block.Header()
-	if len(header.ShardState()) > 0 {
+	// Do bookkeeping for new staking txns
+	if err := bc.UpdateStakingMetaData(
+		batch, block.StakingTransactions(), state, epoch,
+	); err != nil {
+		utils.Logger().Err(err).Msg("UpdateStakingMetaData failed")
+		return NonStatTy, err
+	}
+
+	// Shard State and Validator Update
+	if isNewEpoch {
 		// Write shard state for the new epoch
 		epoch := new(big.Int).Add(header.Epoch(), common.Big1)
 		shardState, err := block.Header().GetShardState()
@@ -100,54 +121,57 @@ func (bc *BlockChain) CommitOffChainData(
 		}
 
 		// Update snapshots for all validators
-		if err := bc.UpdateValidatorSnapshots(batch, epoch); err != nil {
-			return NonStatTy, err
-		}
-	}
-
-	// Do bookkeeping for new staking txns
-	for _, tx := range block.StakingTransactions() {
-		err = bc.UpdateStakingMetaData(batch, tx, root)
-		// keep offchain database consistency with onchain we need revert
-		// but it should not happend unless local database corrupted
-		if err != nil {
-			utils.Logger().Debug().Msgf("oops, UpdateStakingMetaData failed, err: %+v", err)
+		if err := bc.UpdateValidatorSnapshots(batch, epoch, state); err != nil {
 			return NonStatTy, err
 		}
 	}
 
 	// Update voting power of validators for all shards
-	if block.ShardID() == shard.BeaconChainShardID &&
-		len(block.Header().ShardState()) > 0 {
-		shardState := new(shard.State)
-
-		if shardState, err = shard.DecodeWrapper(block.Header().ShardState()); err == nil {
-			if err = bc.UpdateValidatorVotingPower(batch, shardState); err != nil {
-				utils.Logger().Err(err).Msg("[UpdateValidatorVotingPower] Failed to update voting power")
+	if isNewEpoch && isBeaconChain {
+		currentSuperCommittee, _ := bc.ReadShardState(bc.CurrentHeader().Epoch())
+		if shardState, err := shard.DecodeWrapper(
+			header.ShardState(),
+		); err == nil {
+			if err := bc.UpdateValidatorVotingPower(
+				batch, shardState, currentSuperCommittee, state,
+			); err != nil {
+				utils.Logger().
+					Err(err).
+					Msg("[UpdateValidatorVotingPower] Failed to update voting power")
 			}
 		} else {
-			utils.Logger().Err(err).Msg("[UpdateValidatorVotingPower] Failed to decode shard state")
+			utils.Logger().
+				Err(err).
+				Msg("[UpdateValidatorVotingPower] Failed to decode shard state")
 		}
 	}
 
-	//// Writing beacon chain cross links
+	// Writing beacon chain cross links
 	if header.ShardID() == shard.BeaconChainShardID &&
 		bc.chainConfig.IsCrossLink(block.Epoch()) &&
 		len(header.CrossLinks()) > 0 {
 		crossLinks := &types.CrossLinks{}
-		err = rlp.DecodeBytes(header.CrossLinks(), crossLinks)
-		if err != nil {
-			header.Logger(utils.Logger()).Warn().Err(err).Msg("[insertChain/crosslinks] cannot parse cross links")
+		if err := rlp.DecodeBytes(
+			header.CrossLinks(), crossLinks,
+		); err != nil {
+			header.Logger(utils.Logger()).Err(err).
+				Msg("[insertChain/crosslinks] cannot parse cross links")
 			return NonStatTy, err
 		}
 		if !crossLinks.IsSorted() {
-			header.Logger(utils.Logger()).Warn().Err(err).Msg("[insertChain/crosslinks] cross links are not sorted")
+			header.Logger(utils.Logger()).Err(err).
+				Msg("[insertChain/crosslinks] cross links are not sorted")
 			return NonStatTy, errors.New("proposed cross links are not sorted")
 		}
 		for _, crossLink := range *crossLinks {
 			// Process crosslink
-			if err := bc.WriteCrossLinks(batch, types.CrossLinks{crossLink}); err == nil {
-				utils.Logger().Info().Uint64("blockNum", crossLink.BlockNum()).Uint32("shardID", crossLink.ShardID()).Msg("[insertChain/crosslinks] Cross Link Added to Beaconchain")
+			if err := bc.WriteCrossLinks(
+				batch, types.CrossLinks{crossLink},
+			); err == nil {
+				utils.Logger().Info().
+					Uint64("blockNum", crossLink.BlockNum()).
+					Uint32("shardID", crossLink.ShardID()).
+					Msg("[insertChain/crosslinks] Cross Link Added to Beaconchain")
 			}
 
 			cl0, _ := bc.ReadShardLastCrossLink(crossLink.ShardID())
@@ -156,32 +180,48 @@ func (bc *BlockChain) CommitOffChainData(
 			}
 		}
 
-		//clean/update local database cache after crosslink inserted into blockchain
+		// clean/update local database cache after crosslink inserted into blockchain
 		num, err := bc.DeleteFromPendingCrossLinks(*crossLinks)
 		if err != nil {
 			const msg = "DeleteFromPendingCrossLinks, crosslinks in header %d,  pending crosslinks: %d, problem: %+v"
 			utils.Logger().Debug().Msgf(msg, len(*crossLinks), num, err)
 		}
-		utils.Logger().Debug().Msgf("DeleteFromPendingCrossLinks, crosslinks in header %d,  pending crosslinks: %d", len(*crossLinks), num)
+		const msg = "DeleteFromPendingCrossLinks, crosslinks in header %d,  pending crosslinks: %d"
+		utils.Logger().
+			Debug().
+			Msgf(msg, len(*crossLinks), num)
+		utils.Logger().Debug().Msgf(msg, len(*crossLinks), num)
 	}
 	// Roll up latest crosslinks
-	for i := uint32(0); i < shard.Schedule.InstanceForEpoch(epoch).NumShards(); i++ {
-		bc.LastContinuousCrossLink(batch, i)
+	for i, c := uint32(0), shard.Schedule.InstanceForEpoch(
+		epoch,
+	).NumShards(); i < c; i++ {
+		if err := bc.LastContinuousCrossLink(batch, i); err != nil {
+			utils.Logger().Info().
+				Err(err).Msg("could not batch process last continuous crosslink")
+		}
 	}
 
-	if bc.CurrentHeader().ShardID() == shard.BeaconChainShardID {
-		if bc.chainConfig.IsStaking(block.Epoch()) {
+	// Update block reward accumulator and slashes
+	if isBeaconChain {
+		if isStaking {
 			if err := bc.UpdateBlockRewardAccumulator(
-				batch, payout, block.Number().Uint64(),
+				batch, payout.ReadRoundResult().Total, block.Number().Uint64(),
 			); err != nil {
 				return NonStatTy, err
 			}
-			if err := bc.DeletePendingSlashingCandidates(); err != nil {
-				return NonStatTy, err
+			records := slash.Records{}
+			if s := header.Slashes(); len(s) > 0 {
+				if err := rlp.DecodeBytes(s, &records); err != nil {
+					utils.Logger().Debug().Err(err).Msg("could not decode slashes in header")
+				}
+				if err := bc.DeleteFromPendingSlashingCandidates(records); err != nil {
+					utils.Logger().Debug().Err(err).Msg("could not deleting pending slashes")
+				}
 			}
 		} else {
 			// block reward never accumulate before staking
-			bc.WriteBlockRewardAccumulator(batch, big.NewInt(0), block.Number().Uint64())
+			bc.WriteBlockRewardAccumulator(batch, common.Big0, block.Number().Uint64())
 		}
 	}
 

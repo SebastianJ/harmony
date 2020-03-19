@@ -1,6 +1,8 @@
 package types
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"sort"
 
@@ -67,6 +69,25 @@ func (cl CrossLink) Bitmap() []byte {
 // Signature returns aggregated signature
 func (cl CrossLink) Signature() [96]byte {
 	return cl.SignatureF
+}
+
+// MarshalJSON ..
+func (cl CrossLink) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Hash        common.Hash `json:"hash"`
+		BlockNumber *big.Int    `json:"block-number"`
+		Signature   string      `json:"signature"`
+		Bitmap      string      `json:"signature-bitmap"`
+		ShardID     uint32      `json:"shard-id"`
+		EpochNumber *big.Int    `json:"epoch-number"`
+	}{
+		cl.HashF,
+		cl.BlockNumberF,
+		hex.EncodeToString(cl.SignatureF[:]),
+		hex.EncodeToString(cl.BitmapF),
+		cl.ShardIDF,
+		cl.EpochF,
+	})
 }
 
 // Serialize returns bytes of cross link rlp-encoded content

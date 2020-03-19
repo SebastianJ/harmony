@@ -2,7 +2,7 @@ package hmy
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 
@@ -20,11 +20,15 @@ import (
 	"github.com/harmony-one/harmony/core/state"
 	"github.com/harmony-one/harmony/core/types"
 	"github.com/harmony-one/harmony/core/vm"
+	internal_common "github.com/harmony-one/harmony/internal/common"
 	"github.com/harmony-one/harmony/internal/params"
 	"github.com/harmony-one/harmony/shard"
+	"github.com/harmony-one/harmony/shard/committee"
+	"github.com/harmony-one/harmony/staking/availability"
 	"github.com/harmony-one/harmony/staking/effective"
 	"github.com/harmony-one/harmony/staking/network"
 	staking "github.com/harmony-one/harmony/staking/types"
+	"github.com/pkg/errors"
 )
 
 // APIBackend An implementation of internal/hmyapi/Backend. Full client.
@@ -100,9 +104,8 @@ func (b *APIBackend) GetPoolNonce(ctx context.Context, addr common.Address) (uin
 
 // SendTx ...
 func (b *APIBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
-	// return b.hmy.txPool.Add(ctx, signedTx)
 	b.hmy.nodeAPI.AddPendingTransaction(signedTx)
-	return nil // TODO(ricl): AddPendingTransaction should return error
+	return nil
 }
 
 // ChainConfig ...
@@ -323,61 +326,61 @@ func (b *APIBackend) GetAllValidatorAddresses() []common.Address {
 }
 
 // GetValidatorInformation returns the information of validator
-func (b *APIBackend) GetValidatorInformation(addr common.Address) *staking.ValidatorWrapper {
-	val, _ := b.hmy.BlockChain().ReadValidatorInformation(addr)
-	if val != nil {
-		return val
+func (b *APIBackend) GetValidatorInformation(
+	addr common.Address,
+) (*staking.ValidatorRPCEnchanced, error) {
+	wrapper, err := b.hmy.BlockChain().ReadValidatorInformation(addr)
+	if err != nil {
+		s, _ := internal_common.AddressToBech32(addr)
+		return nil, errors.Wrapf(err, "not found address in current state %s", s)
 	}
-	return nil
+
+	now := b.hmy.BlockChain().CurrentHeader().Epoch()
+	inCommittee := now.Cmp(wrapper.LastEpochInCommittee) == 0
+	defaultReply := &staking.ValidatorRPCEnchanced{
+		CurrentlyInCommittee: inCommittee,
+		Wrapper:              *wrapper,
+		Performance:          nil,
+		ComputedMetrics:      nil,
+		TotalDelegated:       wrapper.TotalDelegation(),
+		EPoSStatus: effective.ValidatorStatus(
+			inCommittee, wrapper.Status == effective.Active,
+		).String(),
+	}
+
+	snapshot, err := b.hmy.BlockChain().ReadValidatorSnapshotAtEpoch(
+		now, addr,
+	)
+
+	if err != nil {
+		return defaultReply, nil
+	}
+
+	computed := availability.ComputeCurrentSigning(
+		snapshot, wrapper,
+	)
+	computed.BlocksLeftInEpoch = shard.Schedule.BlocksPerEpoch() - computed.ToSign.Uint64()
+
+	stats, err := b.hmy.BlockChain().ReadValidatorStats(addr)
+	if err != nil {
+		return defaultReply, nil
+	}
+
+	if defaultReply.CurrentlyInCommittee {
+		defaultReply.Performance = &staking.CurrentEpochPerformance{
+			CurrentSigningPercentage: *computed,
+		}
+		defaultReply.ComputedMetrics = stats
+	}
+
+	return defaultReply, nil
 }
 
 // GetMedianRawStakeSnapshot ..
-func (b *APIBackend) GetMedianRawStakeSnapshot() (*big.Int, error) {
-	candidates := b.hmy.BlockChain().ValidatorCandidates()
-	essentials := map[common.Address]effective.SlotOrder{}
-	blsKeys := make(map[shard.BlsPublicKey]struct{})
-	for i := range candidates {
-		validator, err := b.hmy.BlockChain().ReadValidatorInformation(
-			candidates[i],
-		)
-		if err != nil {
-			return nil, err
-		}
-		if !effective.IsEligibleForEPOSAuction(validator) {
-			continue
-		}
-		if err := validator.SanityCheck(); err != nil {
-			continue
-		}
-
-		validatorStake := big.NewInt(0)
-		for i := range validator.Delegations {
-			validatorStake.Add(
-				validatorStake, validator.Delegations[i].Amount,
-			)
-		}
-
-		found := false
-		for _, key := range validator.SlotPubKeys {
-			if _, ok := blsKeys[key]; ok {
-				found = true
-			} else {
-				blsKeys[key] = struct{}{}
-			}
-		}
-
-		if found {
-			continue
-		}
-
-		essentials[validator.Address] = effective.SlotOrder{
-			validatorStake,
-			validator.SlotPubKeys,
-		}
-	}
-	// TODO thread through the right value from shard.Schedule.Instance
-	median, _ := effective.Compute(essentials, 320)
-	return median.TruncateInt(), nil
+func (b *APIBackend) GetMedianRawStakeSnapshot() (
+	*committee.CompletedEPoSRound, error,
+) {
+	return committee.NewEPoSRound(b.hmy.BlockChain())
 }
 
 // GetTotalStakingSnapshot ..
@@ -396,8 +399,9 @@ func (b *APIBackend) GetTotalStakingSnapshot() *big.Int {
 	}
 	stakes := big.NewInt(0)
 	for i := range candidates {
+		snapshot, _ := b.hmy.BlockChain().ReadValidatorSnapshot(candidates[i])
 		validator, _ := b.hmy.BlockChain().ReadValidatorInformation(candidates[i])
-		if !effective.IsEligibleForEPOSAuction(validator) {
+		if !committee.IsEligibleForEPoSAuction(snapshot, validator) {
 			continue
 		}
 		for i := range validator.Delegations {
@@ -406,12 +410,6 @@ func (b *APIBackend) GetTotalStakingSnapshot() *big.Int {
 	}
 	b.TotalStakingCache.TotalStaking = stakes
 	return b.TotalStakingCache.TotalStaking
-}
-
-// GetValidatorStats returns the stats of validator
-func (b *APIBackend) GetValidatorStats(addr common.Address) *staking.ValidatorStats {
-	val, _ := b.hmy.BlockChain().ReadValidatorStats(addr)
-	return val
 }
 
 // GetDelegationsByValidator returns all delegation information of a validator
@@ -496,6 +494,8 @@ func (b *APIBackend) GetCurrentUtilityMetrics() (*network.UtilityMetric, error) 
 // GetSuperCommittees ..
 func (b *APIBackend) GetSuperCommittees() (*quorum.Transition, error) {
 	nowE := b.hmy.BlockChain().CurrentHeader().Epoch()
+	thenE := new(big.Int).Sub(nowE, common.Big1)
+
 	var (
 		nowCommittee, prevCommittee *shard.State
 		err                         error
@@ -504,33 +504,52 @@ func (b *APIBackend) GetSuperCommittees() (*quorum.Transition, error) {
 	if err != nil {
 		return nil, err
 	}
-	prevCommittee, err = b.hmy.BlockChain().ReadShardState(
-		new(big.Int).Sub(nowE, common.Big1),
-	)
+	prevCommittee, err = b.hmy.BlockChain().ReadShardState(thenE)
 	if err != nil {
 		return nil, err
 	}
-	then, now := quorum.NewRegistry(), quorum.NewRegistry()
+
+	stakedSlotsNow, stakedSlotsThen :=
+		shard.ExternalSlotsAvailableForEpoch(nowE),
+		shard.ExternalSlotsAvailableForEpoch(thenE)
+
+	then, now :=
+		quorum.NewRegistry(stakedSlotsThen),
+		quorum.NewRegistry(stakedSlotsNow)
 
 	for _, comm := range prevCommittee.Shards {
-		decider := quorum.NewDecider(quorum.SuperMajorityStake)
-		shardID := comm.ShardID
-		decider.SetShardIDProvider(func() (uint32, error) {
-			return shardID, nil
-		})
-		decider.SetVoters(comm.Slots)
-		then.Deciders[shardID] = decider
+		decider := quorum.NewDecider(quorum.SuperMajorityStake, comm.ShardID)
+		if _, err := decider.SetVoters(&comm, prevCommittee.Epoch); err != nil {
+			return nil, err
+		}
+		then.Deciders[fmt.Sprintf("shard-%d", comm.ShardID)] = decider
 	}
 
 	for _, comm := range nowCommittee.Shards {
-		decider := quorum.NewDecider(quorum.SuperMajorityStake)
-		shardID := comm.ShardID
-		decider.SetShardIDProvider(func() (uint32, error) {
-			return shardID, nil
-		})
-		decider.SetVoters(comm.Slots)
-		now.Deciders[shardID] = decider
+		decider := quorum.NewDecider(quorum.SuperMajorityStake, comm.ShardID)
+		if _, err := decider.SetVoters(&comm, nowCommittee.Epoch); err != nil {
+			return nil, err
+		}
+		now.Deciders[fmt.Sprintf("shard-%d", comm.ShardID)] = decider
+	}
+	return &quorum.Transition{then, now}, nil
+}
+
+// GetCurrentBadBlocks ..
+func (b *APIBackend) GetCurrentBadBlocks() []core.BadBlock {
+	return b.hmy.BlockChain().BadBlocks()
+}
+
+// GetLastCrossLinks ..
+func (b *APIBackend) GetLastCrossLinks() ([]*types.CrossLink, error) {
+	crossLinks := []*types.CrossLink{}
+	for i := uint32(1); i < shard.Schedule.InstanceForEpoch(b.CurrentBlock().Epoch()).NumShards(); i++ {
+		link, err := b.hmy.BlockChain().ReadShardLastCrossLink(i)
+		if err != nil {
+			return nil, err
+		}
+		crossLinks = append(crossLinks, link)
 	}
 
-	return &quorum.Transition{then, now}, nil
+	return crossLinks, nil
 }

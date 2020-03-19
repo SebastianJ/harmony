@@ -17,8 +17,7 @@
 package core
 
 import (
-	"math/big"
-
+	"github.com/harmony-one/harmony/consensus/reward"
 	"github.com/harmony-one/harmony/core/state"
 	"github.com/harmony-one/harmony/core/types"
 	"github.com/harmony-one/harmony/core/vm"
@@ -57,6 +56,7 @@ type Validator interface {
 // failed.
 type Processor interface {
 	Process(block *types.Block, statedb *state.DB, cfg vm.Config) (
-		types.Receipts, types.CXReceipts, []*types.Log, uint64, *big.Int, error,
+		types.Receipts, types.CXReceipts,
+		[]*types.Log, uint64, reward.Reader, error,
 	)
 }

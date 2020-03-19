@@ -167,7 +167,12 @@ func (b *BlockGen) PrevBlock(index int) *types.Block {
 // Blocks created by GenerateChain do not contain valid proof of work
 // values. Inserting them into BlockChain requires use of FakePow or
 // a similar non-validating proof of work implementation.
-func GenerateChain(config *params.ChainConfig, parent *types.Block, engine consensus_engine.Engine, db ethdb.Database, n int, gen func(int, *BlockGen)) ([]*types.Block, []types.Receipts) {
+func GenerateChain(
+	config *params.ChainConfig, parent *types.Block,
+	engine consensus_engine.Engine, db ethdb.Database,
+	n int,
+	gen func(int, *BlockGen),
+) ([]*types.Block, []types.Receipts) {
 	if config == nil {
 		config = params.TestChainConfig
 	}
@@ -175,12 +180,17 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 	blocks, receipts := make(types.Blocks, n), make([]types.Receipts, n)
 	chainreader := &fakeChainReader{config: config}
 	genblock := func(i int, parent *types.Block, statedb *state.DB) (*types.Block, types.Receipts) {
-		b := &BlockGen{i: i, chain: blocks, parent: parent, statedb: statedb, config: config, factory: factory, engine: engine}
+		b := &BlockGen{
+			i:       i,
+			chain:   blocks,
+			parent:  parent,
+			statedb: statedb,
+			config:  config,
+			factory: factory,
+			engine:  engine,
+		}
 		b.header = makeHeader(chainreader, parent, statedb, b.engine, factory)
 
-		//if config.DAOForkSupport && config.DAOForkBlock != nil && config.DAOForkBlock.Cmp(b.header.Number) == 0 {
-		//	misc.ApplyDAOHardFork(statedb)
-		//}
 		// Execute any user modifications to the block
 		if gen != nil {
 			gen(i, b)
@@ -188,7 +198,9 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 
 		if b.engine != nil {
 			// Finalize and seal the block
-			block, _, err := b.engine.Finalize(chainreader, b.header, statedb, b.txs, b.receipts, nil, nil, nil, nil)
+			block, _, err := b.engine.Finalize(
+				chainreader, b.header, statedb, b.txs, b.receipts, nil, nil, nil, nil,
+			)
 			if err != nil {
 				panic(err)
 			}
@@ -274,17 +286,45 @@ func (cr *fakeChainReader) ReadShardState(epoch *big.Int) (*shard.State, error) 
 func (cr *fakeChainReader) ReadElectedValidatorList() ([]common.Address, error)     { return nil, nil }
 func (cr *fakeChainReader) ReadValidatorList() ([]common.Address, error)            { return nil, nil }
 func (cr *fakeChainReader) ValidatorCandidates() []common.Address                   { return nil }
-func (cr *fakeChainReader) SuperCommitteeForNextEpoch(beacon consensus_engine.ChainReader, header *block.Header, isVerify bool) (*shard.State, error) {
+func (cr *fakeChainReader) SuperCommitteeForNextEpoch(
+	beacon consensus_engine.ChainReader, header *block.Header, isVerify bool,
+) (*shard.State, error) {
 	return nil, nil
 }
-func (cr *fakeChainReader) ReadValidatorInformation(addr common.Address) (*staking.ValidatorWrapper, error) {
+func (cr *fakeChainReader) ReadValidatorInformation(
+	addr common.Address,
+) (*staking.ValidatorWrapper, error) {
 	return nil, nil
 }
-func (cr *fakeChainReader) ReadValidatorSnapshot(addr common.Address) (*staking.ValidatorWrapper, error) {
+func (cr *fakeChainReader) ReadValidatorSnapshot(
+	addr common.Address,
+) (*staking.ValidatorWrapper, error) {
 	return nil, nil
 }
-func (cr *fakeChainReader) ReadBlockRewardAccumulator(uint64) (*big.Int, error)         { return nil, nil }
-func (cr *fakeChainReader) ValidatorStakingWithDelegation(addr common.Address) *big.Int { return nil }
-func (cr *fakeChainReader) ReadValidatorStats(addr common.Address) (*staking.ValidatorStats, error) {
+func (cr *fakeChainReader) ReadValidatorSnapshotAtEpoch(
+	epoch *big.Int, addr common.Address,
+) (*staking.ValidatorWrapper, error) {
+	return nil, nil
+}
+
+func (cr *fakeChainReader) ReadBlockRewardAccumulator(
+	uint64,
+) (*big.Int, error) {
+	return nil, nil
+}
+
+func (cr *fakeChainReader) CurrentBlock() *types.Block {
+	return nil
+}
+
+func (cr *fakeChainReader) ValidatorStakingWithDelegation(
+	addr common.Address,
+) *big.Int {
+	return nil
+}
+
+func (cr *fakeChainReader) ReadValidatorStats(
+	addr common.Address,
+) (*staking.ValidatorStats, error) {
 	return nil, nil
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-version="v1 20200212.0"
+version="v1 20200313.0"
 
 unset -v progname
 progname="${0##*/}"
@@ -97,7 +97,7 @@ print_usage() {
 usage: ${progname} [options]
 
 options:
-   -c             back up database/logs and start clean
+   -c             back up database/logs and start clean (not for mainnet)
                   (use only when directed by Harmony)
    -1             do not loop; run once and exit
    -h             print this help and exit
@@ -108,7 +108,7 @@ options:
    -d             just download the Harmony binaries (default: off)
    -D             do not download Harmony binaries (default: download when start)
    -m             collect and upload node metrics to harmony prometheus + grafana
-   -N network     join the given network (mainnet, testnet, devnet; default: mainnet)
+   -N network     join the given network (mainnet, testnet, staking, partner, stress, devnet; default: mainnet)
    -n port        specify the public base port of the node (default: 9000)
    -t             equivalent to -N testnet (deprecated)
    -T nodetype    specify the node type (validator, explorer; default: validator)
@@ -125,7 +125,8 @@ options:
    -M             support multi-key mode (default: off)
    -A             enable archival node mode (default: off)
    -B blacklist   specify file containing blacklisted accounts as a newline delimited file (default: ./.hmy/blacklist.txt)
-   -I             use statically linked Harmony binary
+   -R address     start a pprof profiling server listening on the specified address
+   -I             use statically linked Harmony binary (default: true)
 
 examples:
 
@@ -147,6 +148,14 @@ examples:
 
 # start the node in a different port 9010
    ${progname} -n 9010
+
+# multi-bls: place all keys/passphrases under .hmy/blskeys
+# e.g. <blskey>.key and <blskey>.pass
+   ${progname} -S -M 
+
+# multi-bls using default passphrase: place all keys under .hmy/blskeys
+# supply passphrase file using -p option (single passphrase will be used for all bls keys)
+   ${progname} -S -M -p blspass.txt
 
 ENDEND
 }
@@ -178,13 +187,14 @@ staking_mode=false
 multi_key=false
 archival=false
 blacklist=./.hmy/blacklist.txt
-static=false
+pprof=""
+static=true
 verify=false
 ${BLSKEYFILE=}
 
 unset OPTIND OPTARG opt
 OPTIND=1
-while getopts :1chk:sSp:dDmN:tT:i:ba:U:PvVyzn:MAIB:Y opt
+while getopts :1chk:sSp:dDmN:tT:i:ba:U:PvVyzn:MAIB:R:Y opt
 do
    case "${opt}" in
    '?') usage "unrecognized option -${OPTARG}";;
@@ -211,6 +221,7 @@ do
    U) upgrade_rel="${OPTARG}";;
    P) public_rpc=true;;
    B) blacklist="${OPTARG}";;
+   R) pprof="${OPTARG}";;
    v) msg "version: $version"
       exit 0 ;;
    V) LD_LIBRARY_PATH=. ./harmony -version
@@ -244,7 +255,7 @@ mainnet)
   network_type=mainnet
   dns_zone=t.hmny.io
   ;;
-testnet)
+testnet)  # TODO: update Testnet configs once LRTN is upgraded
   bootnodes=(
     /ip4/54.218.73.167/tcp/9876/p2p/QmWBVCPXQmc2ULigm3b9ayCZa15gj25kywiQQwPhHCZeXj
     /ip4/18.232.171.117/tcp/9876/p2p/QmfJ71Eb7XTDs8hX2vPJ8un4L7b7RiDk6zCzWVxLXGA6MA
@@ -258,9 +269,26 @@ staking)
     /ip4/52.40.84.2/tcp/9800/p2p/QmbPVwrqWsTYXq1RxGWcxx9SWaTUCfoo1wA6wmdbduWe29
     /ip4/54.86.126.90/tcp/9800/p2p/Qmdfjtk6hPoyrH1zVD9PEH4zfWLo38dP2mDvvKXfh3tnEv
   )
-  REL=devnet
-  network_type=devnet
+  REL=pangaea
+  network_type=pangaea
+  dns_zone=os.hmny.io
+  ;;
+partner)
+  bootnodes=(
+    /ip4/52.40.84.2/tcp/9800/p2p/QmbPVwrqWsTYXq1RxGWcxx9SWaTUCfoo1wA6wmdbduWe29
+    /ip4/54.86.126.90/tcp/9800/p2p/Qmdfjtk6hPoyrH1zVD9PEH4zfWLo38dP2mDvvKXfh3tnEv
+  )
+  REL=partner
+  network_type=partner
   dns_zone=ps.hmny.io
+  ;;
+stress)
+  bootnodes=(
+    /ip4/52.40.84.2/tcp/9842/p2p/QmbPVwrqWsTYXq1RxGWcxx9SWaTUCfoo1wA6wmdbduWe29
+  )
+  REL=stressnet
+  network_type=stressnet
+  dns_zone=stn.hmny.io
   ;;
 devnet)
   bootnodes=(
@@ -268,7 +296,7 @@ devnet)
     /ip4/54.86.126.90/tcp/9870/p2p/Qmdfjtk6hPoyrH1zVD9PEH4zfWLo38dP2mDvvKXfh3tnEv
   )
   REL=devnet
-  network_type=pangaea
+  network_type=devnet
   dns_zone=pga.hmny.io
   ;;
 *)
@@ -574,15 +602,19 @@ do
   BN_MA="${BN_MA+"${BN_MA},"}${bn}"
 done
 
-if ${start_clean}
+if [[ "${start_clean}" == "true" && "${network_type}" != "mainnet" ]]
 then
-   msg "backing up old database/logs (-c)"
-   unset -v backup_dir now
-   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   mkdir -p backups
-   backup_dir=$(mktemp -d "backups/${now}.XXXXXX")
-   mv harmony_db_* latest "${backup_dir}/" || :
-   rm -rf latest
+   msg "cleaning up old database/logs (-c)"
+   read -rp "Remove old database/logs? (Y/n) " yesno
+   echo
+   if [[ "$yesno" == "y" || "$yesno" == "Y" ]]; then
+      unset -v backup_dir now
+      now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      mkdir -p backups; rm -rf backups/*
+      backup_dir=$(mktemp -d "backups/${now}.XXXXXX")
+      mv -f harmony_db_* latest .dht* "${backup_dir}/" 2>/dev/null || :
+      rm -rf latest
+   fi
 fi
 mkdir -p latest
 
@@ -694,12 +726,14 @@ kill_node() {
 } > harmony-update.out 2>&1 &
 check_update_pid=$!
 
-if [ -z "${blspass}" ]; then
-   unset -v passphrase
-   read -rsp "Enter passphrase for the BLS key file ${BLSKEYFILE}: " passphrase
-   echo
-elif [ ! -f "${blspass}" ]; then
-   err 10 "can't find the ${blspass} file"
+if ! ${multi_key}; then
+   if [ -z "${blspass}" ]; then
+      unset -v passphrase
+      read -rsp "Enter passphrase for the BLS key file ${BLSKEYFILE}: " passphrase
+      echo
+   elif [ ! -f "${blspass}" ]; then
+      err 10 "can't find the ${blspass} file"
+   fi
 fi
 
 while :
@@ -725,6 +759,11 @@ do
    if ${public_rpc}; then
       args+=(
       -public_rpc
+      )
+   fi
+   if [ ! -z "${pprof}" ]; then
+      args+=(
+      -pprof "${pprof}"
       )
    fi
 # backward compatible with older harmony node software

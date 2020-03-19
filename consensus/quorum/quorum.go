@@ -2,12 +2,12 @@ package quorum
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/harmony-one/bls/ffi/go/bls"
 	"github.com/harmony-one/harmony/consensus/votepower"
 	bls_cosi "github.com/harmony-one/harmony/crypto/bls"
-	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/multibls"
 	"github.com/harmony-one/harmony/numeric"
 	"github.com/harmony-one/harmony/shard"
@@ -26,11 +26,14 @@ const (
 	ViewChange
 )
 
-var phaseNames = map[Phase]string{
-	Prepare:    "Prepare",
-	Commit:     "Commit",
-	ViewChange: "viewChange",
-}
+var (
+	phaseNames = map[Phase]string{
+		Prepare:    "Prepare",
+		Commit:     "Commit",
+		ViewChange: "viewChange",
+	}
+	errPhaseUnknown = errors.New("invariant of known phase violated")
+)
 
 func (p Phase) String() string {
 	if name, ok := phaseNames[p]; ok {
@@ -69,15 +72,16 @@ type ParticipantTracker interface {
 	ParticipantsCount() int64
 	NextAfter(*bls.PublicKey) (bool, *bls.PublicKey)
 	UpdateParticipants(pubKeys []*bls.PublicKey)
-	DumpParticipants() []string
 }
 
 // SignatoryTracker ..
 type SignatoryTracker interface {
 	ParticipantTracker
 	SubmitVote(
-		p Phase, PubKey *bls.PublicKey, sig *bls.Sign, headerHash common.Hash,
-	) *votepower.Ballot
+		p Phase, PubKey *bls.PublicKey,
+		sig *bls.Sign, headerHash common.Hash,
+		height, viewID uint64,
+	) (*votepower.Ballot, error)
 	// Caller assumes concurrency protection
 	SignersCount(Phase) int64
 	reset([]Phase)
@@ -95,13 +99,11 @@ type SignatureReader interface {
 
 // DependencyInjectionWriter ..
 type DependencyInjectionWriter interface {
-	SetShardIDProvider(func() (uint32, error))
 	SetMyPublicKeyProvider(func() (*multibls.PublicKey, error))
 }
 
 // DependencyInjectionReader ..
 type DependencyInjectionReader interface {
-	ShardIDProvider() func() (uint32, error)
 	MyPublicKey() func() (*multibls.PublicKey, error)
 }
 
@@ -110,7 +112,7 @@ type Decider interface {
 	fmt.Stringer
 	SignatureReader
 	DependencyInjectionWriter
-	SetVoters(shard.SlotList) (*TallyResult, error)
+	SetVoters(subCommittee *shard.Committee, epoch *big.Int) (*TallyResult, error)
 	Policy() Policy
 	IsQuorumAchieved(Phase) bool
 	IsQuorumAchievedByMask(mask *bls_cosi.Mask) bool
@@ -123,12 +125,13 @@ type Decider interface {
 
 // Registry ..
 type Registry struct {
-	Deciders map[uint32]Decider
+	Deciders      map[string]Decider `json:"quorum-deciders"`
+	ExternalCount int                `json:"external-slot-count"`
 }
 
 // NewRegistry ..
-func NewRegistry() Registry {
-	return Registry{map[uint32]Decider{}}
+func NewRegistry(extern int) Registry {
+	return Registry{map[string]Decider{}, extern}
 }
 
 // Transition  ..
@@ -159,8 +162,12 @@ func (s *cIdentities) AggregateVotes(p Phase) *bls.Sign {
 	sigs := make([]*bls.Sign, 0, len(ballots))
 	for _, ballot := range ballots {
 		sig := &bls.Sign{}
-		sig.DeserializeHexStr(common.Bytes2Hex(ballot.Signature))
-		sigs = append(sigs, sig)
+		// NOTE invariant that shouldn't happen by now
+		// but pointers are pointers
+		if ballot != nil {
+			sig.DeserializeHexStr(common.Bytes2Hex(ballot.Signature))
+			sigs = append(sigs, sig)
+		}
 	}
 	return bls_cosi.AggregateSig(sigs)
 }
@@ -197,14 +204,6 @@ func (s *cIdentities) UpdateParticipants(pubKeys []*bls.PublicKey) {
 	s.publicKeys = append(pubKeys[:0:0], pubKeys...)
 }
 
-func (s *cIdentities) DumpParticipants() []string {
-	keys := make([]string, len(s.publicKeys))
-	for i := range s.publicKeys {
-		keys[i] = s.publicKeys[i].SerializeToHexStr()
-	}
-	return keys
-}
-
 func (s *cIdentities) ParticipantsCount() int64 {
 	return int64(len(s.publicKeys))
 }
@@ -224,26 +223,31 @@ func (s *cIdentities) SignersCount(p Phase) int64 {
 }
 
 func (s *cIdentities) SubmitVote(
-	p Phase, PubKey *bls.PublicKey, sig *bls.Sign, headerHash common.Hash,
-) *votepower.Ballot {
+	p Phase, PubKey *bls.PublicKey,
+	sig *bls.Sign, headerHash common.Hash,
+	height, viewID uint64,
+) (*votepower.Ballot, error) {
+	// Note safe to assume by this point because key has been
+	// checked earlier
+	key := *shard.FromLibBLSPublicKeyUnsafe(PubKey)
 	ballot := &votepower.Ballot{
-		SignerPubKey:    *shard.FromLibBLSPublicKeyUnsafe(PubKey),
+		SignerPubKey:    key,
 		BlockHeaderHash: headerHash,
 		Signature:       common.Hex2Bytes(sig.SerializeToHexStr()),
+		Height:          height,
+		ViewID:          viewID,
 	}
-	switch hex := PubKey.SerializeToHexStr(); p {
+	switch p {
 	case Prepare:
-		s.prepare.BallotBox[hex] = ballot
+		s.prepare.BallotBox[key] = ballot
 	case Commit:
-		s.commit.BallotBox[hex] = ballot
+		s.commit.BallotBox[key] = ballot
 	case ViewChange:
-		s.viewChange.BallotBox[hex] = ballot
+		s.viewChange.BallotBox[key] = ballot
 	default:
-		utils.Logger().Err(errors.New("invariant of known phase violated")).
-			Str("phase", p.String()).
-			Msg("bad vote input")
+		return nil, errors.Wrapf(errPhaseUnknown, "given: %s", p.String())
 	}
-	return ballot
+	return ballot, nil
 }
 
 func (s *cIdentities) reset(ps []Phase) {
@@ -264,8 +268,8 @@ func (s *cIdentities) TwoThirdsSignersCount() int64 {
 }
 
 func (s *cIdentities) ReadBallot(p Phase, PubKey *bls.PublicKey) *votepower.Ballot {
-	var ballotBox map[string]*votepower.Ballot
-	hex := PubKey.SerializeToHexStr()
+	ballotBox := map[shard.BlsPublicKey]*votepower.Ballot{}
+	key := *shard.FromLibBLSPublicKeyUnsafe(PubKey)
 
 	switch p {
 	case Prepare:
@@ -276,7 +280,7 @@ func (s *cIdentities) ReadBallot(p Phase, PubKey *bls.PublicKey) *votepower.Ball
 		ballotBox = s.viewChange.BallotBox
 	}
 
-	payload, ok := ballotBox[hex]
+	payload, ok := ballotBox[key]
 	if !ok {
 		return nil
 	}
@@ -284,7 +288,7 @@ func (s *cIdentities) ReadBallot(p Phase, PubKey *bls.PublicKey) *votepower.Ball
 }
 
 func (s *cIdentities) ReadAllBallots(p Phase) []*votepower.Ballot {
-	var m map[string]*votepower.Ballot
+	m := map[shard.BlsPublicKey]*votepower.Ballot{}
 	switch p {
 	case Prepare:
 		m = s.prepare.BallotBox
@@ -294,8 +298,8 @@ func (s *cIdentities) ReadAllBallots(p Phase) []*votepower.Ballot {
 		m = s.viewChange.BallotBox
 	}
 	ballots := make([]*votepower.Ballot, 0, len(m))
-	for _, ballot := range m {
-		ballots = append(ballots, ballot)
+	for i := range m {
+		ballots = append(ballots, m[i])
 	}
 	return ballots
 }
@@ -315,14 +319,6 @@ type composite struct {
 	SignatureReader
 }
 
-func (d *depInject) SetShardIDProvider(p func() (uint32, error)) {
-	d.shardIDProvider = p
-}
-
-func (d *depInject) ShardIDProvider() func() (uint32, error) {
-	return d.shardIDProvider
-}
-
 func (d *depInject) SetMyPublicKeyProvider(p func() (*multibls.PublicKey, error)) {
 	d.publicKeyProvider = p
 }
@@ -332,7 +328,7 @@ func (d *depInject) MyPublicKey() func() (*multibls.PublicKey, error) {
 }
 
 // NewDecider ..
-func NewDecider(p Policy) Decider {
+func NewDecider(p Policy, shardID uint32) Decider {
 	signatureStore := newBallotsBackedSignatureReader()
 	deps := &depInject{}
 	c := &composite{deps, deps, signatureStore}
@@ -346,7 +342,7 @@ func NewDecider(p Policy) Decider {
 			c.SignatureReader,
 			c.DependencyInjectionWriter,
 			c.DependencyInjectionWriter.(DependencyInjectionReader),
-			*votepower.NewRoster(),
+			*votepower.NewRoster(shardID),
 			newBallotBox(),
 		}
 	default:

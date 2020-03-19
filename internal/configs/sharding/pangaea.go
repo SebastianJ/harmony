@@ -3,15 +3,10 @@ package shardingconfig
 import (
 	"math/big"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/harmony-one/harmony/internal/genesis"
-)
+	"github.com/harmony-one/harmony/numeric"
 
-const (
-	// PangaeaHTTPPattern is the http pattern for pangaea.
-	PangaeaHTTPPattern = "https://api.s%d.pga.hmny.io"
-	// PangaeaWSPattern is the websocket pattern for pangaea.
-	PangaeaWSPattern = "wss://ws.s%d.pga.hmny.io"
+	"github.com/harmony-one/harmony/internal/genesis"
+	"github.com/harmony-one/harmony/internal/params"
 )
 
 // PangaeaSchedule is the Pangaea sharding configuration schedule.
@@ -19,16 +14,34 @@ var PangaeaSchedule pangaeaSchedule
 
 type pangaeaSchedule struct{}
 
-func (ps pangaeaSchedule) InstanceForEpoch(epoch *big.Int) Instance {
-	return pangaeaV0
+const (
+	// ~304 sec epochs for P2 of open staking
+	pangaeaBlocksPerEpoch = 38
+
+	pangaeaVdfDifficulty = 10000 // This takes about 20s to finish the vdf
+
+	// PangaeaHTTPPattern is the http pattern for pangaea.
+	PangaeaHTTPPattern = "https://api.s%d.os.hmny.io"
+	// PangaeaWSPattern is the websocket pattern for pangaea.
+	PangaeaWSPattern = "wss://ws.s%d.os.hmny.io"
+)
+
+func (pangaeaSchedule) InstanceForEpoch(epoch *big.Int) Instance {
+	switch {
+	case epoch.Cmp(params.PangaeaChainConfig.StakingEpoch) >= 0:
+		return pangaeaV1
+	default: // genesis
+		return pangaeaV0
+	}
 }
 
 func (ps pangaeaSchedule) BlocksPerEpoch() uint64 {
-	return 150 // 1/3 hour with 8 seconds/block
+	return pangaeaBlocksPerEpoch
 }
 
 func (ps pangaeaSchedule) CalcEpochNumber(blockNum uint64) *big.Int {
-	return big.NewInt(int64(blockNum / ps.BlocksPerEpoch()))
+	epoch := blockNum / ps.BlocksPerEpoch()
+	return big.NewInt(int64(epoch))
 }
 
 func (ps pangaeaSchedule) IsLastBlock(blockNum uint64) bool {
@@ -36,22 +49,16 @@ func (ps pangaeaSchedule) IsLastBlock(blockNum uint64) bool {
 }
 
 func (ps pangaeaSchedule) EpochLastBlock(epochNum uint64) uint64 {
-	blocks := ps.BlocksPerEpoch()
-	return blocks*(epochNum+1) - 1
+	return ps.BlocksPerEpoch()*(epochNum+1) - 1
 }
 
 func (ps pangaeaSchedule) VdfDifficulty() int {
-	return testnetVdfDifficulty
+	return pangaeaVdfDifficulty
 }
 
 func (ps pangaeaSchedule) ConsensusRatio() float64 {
 	return mainnetConsensusRatio
 }
-
-var pangaeaReshardingEpoch = []*big.Int{common.Big0}
-
-var pangaeaV0 = MustNewInstance(
-	2, 50, 40, genesis.PangaeaAccounts, genesis.FoundationalPangaeaAccounts, pangaeaReshardingEpoch, PangaeaSchedule.BlocksPerEpoch())
 
 // TODO: remove it after randomness feature turned on mainnet
 //RandonnessStartingEpoch returns starting epoch of randonness generation
@@ -67,3 +74,11 @@ func (pangaeaSchedule) GetNetworkID() NetworkID {
 func (pangaeaSchedule) GetShardingStructure(numShard, shardID int) []map[string]interface{} {
 	return genShardingStructure(numShard, shardID, PangaeaHTTPPattern, PangaeaWSPattern)
 }
+
+var pangaeaReshardingEpoch = []*big.Int{
+	big.NewInt(0),
+	params.PangaeaChainConfig.StakingEpoch,
+}
+
+var pangaeaV0 = MustNewInstance(4, 60, 60, numeric.OneDec(), genesis.TNHarmonyAccounts, genesis.TNFoundationalAccounts, pangaeaReshardingEpoch, PangaeaSchedule.BlocksPerEpoch())
+var pangaeaV1 = MustNewInstance(4, 110, 60, numeric.MustNewDecFromStr("0.68"), genesis.TNHarmonyAccounts, genesis.TNFoundationalAccounts, pangaeaReshardingEpoch, PangaeaSchedule.BlocksPerEpoch())

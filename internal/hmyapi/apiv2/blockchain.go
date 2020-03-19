@@ -2,7 +2,6 @@ package apiv2
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -24,8 +23,10 @@ import (
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/numeric"
 	"github.com/harmony-one/harmony/shard"
+	"github.com/harmony-one/harmony/shard/committee"
 	"github.com/harmony-one/harmony/staking/network"
 	staking "github.com/harmony-one/harmony/staking/types"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -499,7 +500,9 @@ func (s *PublicBlockChainAPI) GetTotalStaking() (*big.Int, error) {
 
 // GetMedianRawStakeSnapshot returns the raw median stake, only meant to be called on beaconchain
 // explorer node
-func (s *PublicBlockChainAPI) GetMedianRawStakeSnapshot() (*big.Int, error) {
+func (s *PublicBlockChainAPI) GetMedianRawStakeSnapshot() (
+	*committee.CompletedEPoSRound, error,
+) {
 	if s.b.GetShardID() == shard.BeaconChainShardID {
 		return s.b.GetMedianRawStakeSnapshot()
 	}
@@ -526,37 +529,26 @@ func (s *PublicBlockChainAPI) GetElectedValidatorAddresses() ([]string, error) {
 	return addresses, nil
 }
 
-// GetValidatorMetrics ..
-func (s *PublicBlockChainAPI) GetValidatorMetrics(ctx context.Context, address string) (*staking.ValidatorStats, error) {
-	validatorAddress := internal_common.ParseAddr(address)
-	stats := s.b.GetValidatorStats(validatorAddress)
-	if stats == nil {
-		addr, _ := internal_common.AddressToBech32(validatorAddress)
-		return nil, fmt.Errorf("validator stats not found: %s", addr)
-	}
-	return stats, nil
-}
-
-// GetValidatorInformation returns information about a validator.
-func (s *PublicBlockChainAPI) GetValidatorInformation(ctx context.Context, address string) (*staking.ValidatorWrapper, error) {
-	validatorAddress := internal_common.ParseAddr(address)
-	validator := s.b.GetValidatorInformation(validatorAddress)
-	if validator == nil {
-		addr, _ := internal_common.AddressToBech32(validatorAddress)
-		return nil, fmt.Errorf("validator not found: %s", addr)
-	}
-	return validator, nil
+// GetValidatorInformation ..
+func (s *PublicBlockChainAPI) GetValidatorInformation(
+	ctx context.Context, address string,
+) (*staking.ValidatorRPCEnchanced, error) {
+	return s.b.GetValidatorInformation(
+		internal_common.ParseAddr(address),
+	)
 }
 
 // GetAllValidatorInformation returns information about all validators.
 // If page is -1, return all else return the pagination.
-func (s *PublicBlockChainAPI) GetAllValidatorInformation(ctx context.Context, page int) ([]*staking.ValidatorWrapper, error) {
+func (s *PublicBlockChainAPI) GetAllValidatorInformation(
+	ctx context.Context, page int,
+) ([]*staking.ValidatorRPCEnchanced, error) {
 	if page < -1 {
-		return make([]*staking.ValidatorWrapper, 0), nil
+		return nil, errors.Errorf("page given %d cannot be less than -1", page)
 	}
 	addresses := s.b.GetAllValidatorAddresses()
 	if page != -1 && len(addresses) <= page*validatorsPageSize {
-		return make([]*staking.ValidatorWrapper, 0), nil
+		return make([]*staking.ValidatorRPCEnchanced, 0), nil
 	}
 	validatorsNum := len(addresses)
 	start := 0
@@ -567,13 +559,13 @@ func (s *PublicBlockChainAPI) GetAllValidatorInformation(ctx context.Context, pa
 			validatorsNum = len(addresses) - start
 		}
 	}
-	validators := make([]*staking.ValidatorWrapper, validatorsNum)
+	validators := make([]*staking.ValidatorRPCEnchanced, validatorsNum)
 	for i := start; i < start+validatorsNum; i++ {
-		validators[i-start] = s.b.GetValidatorInformation(addresses[i])
-		if validators[i-start] == nil {
-			addr, _ := internal_common.AddressToBech32(addresses[i])
-			return nil, fmt.Errorf("error when getting validator info of %s", addr)
+		information, err := s.b.GetValidatorInformation(addresses[i])
+		if err != nil {
+			return nil, err
 		}
+		validators[i-start] = information
 	}
 	return validators, nil
 }
@@ -777,6 +769,11 @@ func (s *PublicBlockChainAPI) GetSuperCommittees() (*quorum.Transition, error) {
 	return nil, errNotBeaconChainShard
 }
 
+// GetCurrentBadBlocks ..
+func (s *PublicBlockChainAPI) GetCurrentBadBlocks() []core.BadBlock {
+	return s.b.GetCurrentBadBlocks()
+}
+
 // GetTotalSupply ..
 func (s *PublicBlockChainAPI) GetTotalSupply() (numeric.Dec, error) {
 	return numeric.NewDec(initSupply), nil
@@ -789,12 +786,14 @@ func (s *PublicBlockChainAPI) GetCirculatingSupply() (numeric.Dec, error) {
 }
 
 // GetStakingNetworkInfo ..
-func (s *PublicBlockChainAPI) GetStakingNetworkInfo(ctx context.Context) (*StakingNetworkInfo, error) {
+func (s *PublicBlockChainAPI) GetStakingNetworkInfo(
+	ctx context.Context,
+) (*StakingNetworkInfo, error) {
 	if s.b.GetShardID() != shard.BeaconChainShardID {
 		return nil, errNotBeaconChainShard
 	}
 	totalStaking, _ := s.GetTotalStaking()
-	medianRawStake, _ := s.GetMedianRawStakeSnapshot()
+	round, _ := s.GetMedianRawStakeSnapshot()
 	epoch := s.GetEpoch(ctx)
 	epochLastBlock, _ := s.EpochLastBlock(epoch)
 	totalSupply, _ := s.GetTotalSupply()
@@ -804,6 +803,14 @@ func (s *PublicBlockChainAPI) GetStakingNetworkInfo(ctx context.Context) (*Staki
 		CirculatingSupply: circulatingSupply,
 		EpochLastBlock:    epochLastBlock,
 		TotalStaking:      totalStaking,
-		MedianRawStake:    medianRawStake,
+		MedianRawStake:    round.MedianStake,
 	}, nil
+}
+
+// GetLastCrossLinks ..
+func (s *PublicBlockChainAPI) GetLastCrossLinks() ([]*types.CrossLink, error) {
+	if s.b.GetShardID() == shard.BeaconChainShardID {
+		return s.b.GetLastCrossLinks()
+	}
+	return nil, errNotBeaconChainShard
 }

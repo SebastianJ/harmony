@@ -19,7 +19,6 @@ import (
 	"github.com/harmony-one/harmony/api/service/syncing"
 	"github.com/harmony-one/harmony/api/service/syncing/downloader"
 	"github.com/harmony-one/harmony/consensus"
-	"github.com/harmony-one/harmony/consensus/reward"
 	"github.com/harmony-one/harmony/core"
 	"github.com/harmony-one/harmony/core/rawdb"
 	"github.com/harmony-one/harmony/core/types"
@@ -38,6 +37,7 @@ import (
 	"github.com/harmony-one/harmony/shard/committee"
 	"github.com/harmony-one/harmony/staking/slash"
 	staking "github.com/harmony-one/harmony/staking/types"
+	"github.com/harmony-one/harmony/webhooks"
 )
 
 // State is a state of a node.
@@ -316,32 +316,36 @@ func (node *Node) addPendingStakingTransactions(newStakingTxs staking.StakingTra
 }
 
 // AddPendingStakingTransaction staking transactions
-func (node *Node) AddPendingStakingTransaction(newStakingTx *staking.StakingTransaction) {
+func (node *Node) AddPendingStakingTransaction(
+	newStakingTx *staking.StakingTransaction,
+) error {
 	if node.NodeConfig.ShardID == shard.BeaconChainShardID {
 		errs := node.addPendingStakingTransactions(staking.StakingTransactions{newStakingTx})
 		for i := range errs {
 			if errs[i] != nil {
-				return
+				return errs[i]
 			}
 		}
 		utils.Logger().Info().Str("Hash", newStakingTx.Hash().Hex()).Msg("Broadcasting Staking Tx")
 		node.tryBroadcastStaking(newStakingTx)
 	}
+	return nil
 }
 
 // AddPendingTransaction adds one new transaction to the pending transaction list.
 // This is only called from SDK.
-func (node *Node) AddPendingTransaction(newTx *types.Transaction) {
+func (node *Node) AddPendingTransaction(newTx *types.Transaction) error {
 	if newTx.ShardID() == node.NodeConfig.ShardID {
 		errs := node.addPendingTransactions(types.Transactions{newTx})
 		for i := range errs {
 			if errs[i] != nil {
-				return
+				return errs[i]
 			}
 		}
 		utils.Logger().Info().Str("Hash", newTx.Hash().Hex()).Msg("Broadcasting Tx")
 		node.tryBroadcast(newTx)
 	}
+	return nil
 }
 
 // AddPendingReceipts adds one receipt message to pending list.
@@ -452,8 +456,13 @@ func (node *Node) GetSyncID() [SyncIDLength]byte {
 }
 
 // New creates a new node.
-func New(host p2p.Host, consensusObj *consensus.Consensus,
-	chainDBFactory shardchain.DBFactory, blacklist map[common.Address]struct{}, isArchival bool) *Node {
+func New(
+	host p2p.Host,
+	consensusObj *consensus.Consensus,
+	chainDBFactory shardchain.DBFactory,
+	blacklist map[common.Address]struct{},
+	isArchival bool,
+) *Node {
 	node := Node{}
 	const sinkSize = 4096
 	node.errorSink = struct {
@@ -497,8 +506,15 @@ func New(host p2p.Host, consensusObj *consensus.Consensus,
 		blockchain := node.Blockchain() // this also sets node.isFirstTime if the DB is fresh
 		beaconChain := node.Beaconchain()
 		if b1, b2 := beaconChain == nil, blockchain == nil; b1 || b2 {
+
+			shardID := node.NodeConfig.ShardID
+			// HACK get the real error reason
+			_, err := node.shardChains.ShardChain(shardID)
+
 			fmt.Fprintf(
-				os.Stderr, "beaconchain-is-nil:%t shardchain-is-nil:%t", b1, b2,
+				os.Stderr,
+				"reason:%s beaconchain-is-nil:%t shardchain-is-nil:%t",
+				err.Error(), b1, b2,
 			)
 			os.Exit(-1)
 		}
@@ -537,11 +553,9 @@ func New(host p2p.Host, consensusObj *consensus.Consensus,
 			)
 		}
 
-		node.pendingCXReceipts = make(map[string]*types.CXReceiptsProof)
+		node.pendingCXReceipts = map[string]*types.CXReceiptsProof{}
 		node.Consensus.VerifiedNewBlock = make(chan *types.Block)
-		chain.Engine.SetRewarder(node.Consensus.Decider.(reward.Distributor))
 		chain.Engine.SetBeaconchain(beaconChain)
-
 		// the sequence number is the next block number to be added in consensus protocol, which is
 		// always one more than current chain header block
 		node.Consensus.SetBlockNum(blockchain.CurrentBlock().NumberU64() + 1)
@@ -572,36 +586,39 @@ func New(host p2p.Host, consensusObj *consensus.Consensus,
 	node.globalRxQueue = msgq.New(GlobalRxQueueSize)
 
 	// Setup initial state of syncing.
-	node.peerRegistrationRecord = make(map[string]*syncConfig)
+	node.peerRegistrationRecord = map[string]*syncConfig{}
 	node.startConsensus = make(chan struct{})
 	go node.bootstrapConsensus()
 	// Broadcast double-signers reported by consensus
 	if node.Consensus != nil {
 		go func() {
-
 			for {
 				select {
 				case doubleSign := <-node.Consensus.SlashChan:
-					l := utils.Logger().Info().RawJSON("double-sign", []byte(doubleSign.String()))
-
+					utils.Logger().Info().
+						RawJSON("double-sign-candidate", []byte(doubleSign.String())).
+						Msg("double sign notified by consensus leader")
 					// no point to broadcast the slash if we aren't even in the right epoch yet
 					if !node.Blockchain().Config().IsStaking(
 						node.Blockchain().CurrentHeader().Epoch(),
 					) {
-						l.Msg("double sign occured before staking era, no-op")
 						return
 					}
-					if hooks := node.NodeConfig.WebHooks.DoubleSigning; hooks != nil {
-						url := hooks.WebHooks.OnNoticeDoubleSign
-						go func() { slash.DoPost(url, &doubleSign) }()
+					if hooks := node.NodeConfig.WebHooks.Hooks; hooks != nil {
+						if s := hooks.Slashing; s != nil {
+							url := s.OnNoticeDoubleSign
+							go func() { webhooks.DoPost(url, &doubleSign) }()
+						}
 					}
 					if node.NodeConfig.ShardID != shard.BeaconChainShardID {
 						go node.BroadcastSlash(&doubleSign)
-						l.Msg("broadcast the double sign record")
 					} else {
 						records := slash.Records{doubleSign}
-						node.Blockchain().AddPendingSlashingCandidates(records)
-						l.Msg("added double sign record to off-chain pending")
+						if err := node.Blockchain().AddPendingSlashingCandidates(
+							records,
+						); err != nil {
+							utils.Logger().Err(err).Msg("could not add new slash to ending slashes")
+						}
 					}
 				}
 			}
@@ -615,8 +632,11 @@ func New(host p2p.Host, consensusObj *consensus.Consensus,
 // keys for consensus and drand
 func (node *Node) InitConsensusWithValidators() (err error) {
 	if node.Consensus == nil {
-		utils.Logger().Error().Msg("[InitConsensusWithValidators] consenus is nil; Cannot figure out shardID")
-		return ctxerror.New("[InitConsensusWithValidators] consenus is nil; Cannot figure out shardID")
+		utils.Logger().Error().
+			Msg("[InitConsensusWithValidators] consenus is nil; Cannot figure out shardID")
+		return ctxerror.New(
+			"[InitConsensusWithValidators] consenus is nil; Cannot figure out shardID",
+		)
 	}
 	shardID := node.Consensus.ShardID
 	blockNum := node.Blockchain().CurrentBlock().NumberU64()
@@ -638,10 +658,12 @@ func (node *Node) InitConsensusWithValidators() (err error) {
 			Msg("[InitConsensusWithValidators] Failed getting shard state")
 		return err
 	}
-	pubKeys := committee.WithStakingEnabled.GetCommitteePublicKeys(
-		shardState.FindCommitteeByID(shardID),
-	)
-	if len(pubKeys) == 0 {
+	subComm, err := shardState.FindCommitteeByID(shardID)
+	if err != nil {
+		return err
+	}
+	pubKeys, err := subComm.BLSPublicKeys()
+	if err != nil {
 		utils.Logger().Error().
 			Uint32("shardID", shardID).
 			Uint64("blockNum", blockNum).
@@ -663,7 +685,8 @@ func (node *Node) InitConsensusWithValidators() (err error) {
 			return nil
 		}
 	}
-	// TODO: Disable drand. Currently drand isn't functioning but we want to compeletely turn it off for full protection.
+	// TODO: Disable drand. Currently drand isn't
+	// functioning but we want to compeletely turn it off for full protection.
 	// node.DRand.UpdatePublicKeys(pubKeys)
 	return nil
 }
@@ -704,13 +727,14 @@ func (node *Node) initNodeConfiguration() (service.NodeConfig, chan p2p.Peer) {
 		PushgatewayIP:   node.NodeConfig.GetPushgatewayIP(),
 		PushgatewayPort: node.NodeConfig.GetPushgatewayPort(),
 		IsClient:        node.NodeConfig.IsClient(),
-		Beacon:          nodeconfig.NewGroupIDByShardID(0),
+		Beacon:          nodeconfig.NewGroupIDByShardID(shard.BeaconChainShardID),
 		ShardGroupID:    node.NodeConfig.GetShardGroupID(),
 		Actions:         make(map[nodeconfig.GroupID]nodeconfig.ActionType),
 	}
 
 	if nodeConfig.IsClient {
-		nodeConfig.Actions[nodeconfig.NewClientGroupIDByShardID(0)] = nodeconfig.ActionStart
+		nodeConfig.Actions[nodeconfig.NewClientGroupIDByShardID(shard.BeaconChainShardID)] =
+			nodeconfig.ActionStart
 	} else {
 		nodeConfig.Actions[node.NodeConfig.GetShardGroupID()] = nodeconfig.ActionStart
 	}
@@ -721,7 +745,9 @@ func (node *Node) initNodeConfiguration() (service.NodeConfig, chan p2p.Peer) {
 		utils.Logger().Error().Err(err).Msg("Failed to create shard receiver")
 	}
 
-	node.globalGroupReceiver, err = node.host.GroupReceiver(nodeconfig.NewClientGroupIDByShardID(0))
+	node.globalGroupReceiver, err = node.host.GroupReceiver(
+		nodeconfig.NewClientGroupIDByShardID(shard.BeaconChainShardID),
+	)
 	if err != nil {
 		utils.Logger().Error().Err(err).Msg("Failed to create global receiver")
 	}

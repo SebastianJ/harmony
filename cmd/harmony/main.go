@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"math/big"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path"
@@ -15,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/harmony-one/harmony/numeric"
 
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -38,7 +42,7 @@ import (
 	"github.com/harmony-one/harmony/p2p/p2pimpl"
 	p2putils "github.com/harmony-one/harmony/p2p/utils"
 	"github.com/harmony-one/harmony/shard"
-	"github.com/harmony-one/harmony/staking/slash"
+	"github.com/harmony-one/harmony/webhooks"
 	golog "github.com/ipfs/go-log"
 	"github.com/pkg/errors"
 	gologging "github.com/whyrusleeping/go-logging"
@@ -70,6 +74,7 @@ var (
 	freshDB          = flag.Bool("fresh_db", false, "true means the existing disk based db will be removed")
 	profile          = flag.Bool("profile", false, "Turn on profiling (CPU, Memory).")
 	metricsReportURL = flag.String("metrics_report_url", "", "If set, reports metrics to this URL.")
+	pprof            = flag.String("pprof", "", "what address and port the pprof profiling server should listen on")
 	versionFlag      = flag.Bool("version", false, "Output version info")
 	onlyLogTps       = flag.Bool("only_log_tps", false, "Only log TPS if true")
 	dnsZone          = flag.String("dns_zone", "", "if given and not empty, use peers from the zone (default: use libp2p peer discovery instead)")
@@ -87,7 +92,7 @@ var (
 	// nodeType indicates the type of the node: validator, explorer
 	nodeType = flag.String("node_type", "validator", "node type: validator, explorer")
 	// networkType indicates the type of the network
-	networkType = flag.String("network_type", "mainnet", "type of the network: mainnet, testnet, devnet, localnet")
+	networkType = flag.String("network_type", "mainnet", "type of the network: mainnet, testnet, pangaea, partner, stressnet, devnet, localnet")
 	// syncFreq indicates sync frequency
 	syncFreq = flag.Int("sync_freq", 60, "unit in seconds")
 	// beaconSyncFreq indicates beaconchain sync frequency
@@ -102,7 +107,7 @@ var (
 	enableMemProfiling = flag.Bool("enableMemProfiling", false, "Enable memsize logging.")
 	enableGC           = flag.Bool("enableGC", true, "Enable calling garbage collector manually .")
 	blsKeyFile         = flag.String("blskey_file", "", "The encrypted file of bls serialized private key by passphrase.")
-	blsFolder          = flag.String("blsfolder", ".hmy/blskeys", "The folder that stores the bls keys; same blspass is used to decrypt all bls keys; all bls keys mapped to same shard")
+	blsFolder          = flag.String("blsfolder", ".hmy/blskeys", "The folder that stores the bls keys and corresponding passphrases; e.g. <blskey>.key and <blskey>.pass; all bls keys mapped to same shard")
 	blsPass            = flag.String("blspass", "", "The file containing passphrase to decrypt the encrypted bls file.")
 	blsPassphrase      string
 	// Sharding configuration parameters for devnet
@@ -140,6 +145,11 @@ var (
 )
 
 func initSetup() {
+
+	// Setup pprof
+	if addr := *pprof; addr != "" {
+		go func() { http.ListenAndServe(addr, nil) }()
+	}
 
 	// maybe request passphrase for bls key.
 	passphraseForBls()
@@ -250,6 +260,9 @@ func setupStakingNodeAccount() error {
 	if err != nil {
 		return errors.Wrap(err, "cannot determine shard to join")
 	}
+	if err := nodeconfig.GetDefaultConfig().ValidateConsensusKeysForSameShard(pubKey.PublicKey, shardID); err != nil {
+		return err
+	}
 	for _, blsKey := range pubKey.PublicKey {
 		initialAccount := &genesis.DeployAccount{}
 		initialAccount.ShardID = shardID
@@ -261,19 +274,53 @@ func setupStakingNodeAccount() error {
 }
 
 func readMultiBlsKeys(consensusMultiBlsPriKey *multibls.PrivateKey, consensusMultiBlsPubKey *multibls.PublicKey) error {
-	multiBlsKeyDir := blsFolder
-	blsKeyFiles, err := ioutil.ReadDir(*multiBlsKeyDir)
-	if err != nil {
-		return err
-	}
-
-	for _, blsKeyFile := range blsKeyFiles {
-		if filepath.Ext(blsKeyFile.Name()) != ".key" {
-			fmt.Println("BLS key file should have .key file extension, found", blsKeyFile.Name())
-			continue
+	keyPasses := map[string]string{}
+	blsKeyFiles := []os.FileInfo{}
+	if err := filepath.Walk(*blsFolder, func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			return nil
 		}
-		blsKeyFilePath := path.Join(*multiBlsKeyDir, blsKeyFile.Name())
-		consensusPriKey, err := blsgen.LoadBlsKeyWithPassPhrase(blsKeyFilePath, blsPassphrase) // uses the same bls passphrase for multiple bls keys
+		fullName := info.Name()
+		ext := filepath.Ext(fullName)
+		if ext == ".key" {
+			blsKeyFiles = append(blsKeyFiles, info)
+		} else if ext == ".pass" {
+			passFileName := "file:" + path
+			passphrase, err := utils.GetPassphraseFromSource(passFileName)
+			if err != nil {
+				return err
+			}
+			name := fullName[:len(fullName)-len(ext)]
+			keyPasses[name] = passphrase
+		} else {
+			return errors.Errorf(
+				"[Multi-BLS] found file: %s that does not have .key or .pass file extension",
+				path,
+			)
+		}
+		return nil
+	}); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"[Multi-BLS] ERROR when reading blskey file under %s: %v\n",
+			*blsFolder,
+			err,
+		)
+		os.Exit(100)
+	}
+	for _, blsKeyFile := range blsKeyFiles {
+		fullName := blsKeyFile.Name()
+		ext := filepath.Ext(fullName)
+		name := fullName[:len(fullName)-len(ext)]
+		if val, ok := keyPasses[name]; ok {
+			blsPassphrase = val
+		} else {
+			fmt.Printf("[Multi-BLS] could not find passphrase for bls key file: %s, using passphrase from %s\n",
+				fullName,
+				*blsPass,
+			)
+		}
+		blsKeyFilePath := path.Join(*blsFolder, blsKeyFile.Name())
+		consensusPriKey, err := blsgen.LoadBlsKeyWithPassPhrase(blsKeyFilePath, blsPassphrase)
 		if err != nil {
 			return err
 		}
@@ -292,7 +339,7 @@ func setupConsensusKey(nodeConfig *nodeconfig.ConfigType) multibls.PublicKey {
 	if *blsKeyFile != "" {
 		consensusPriKey, err := blsgen.LoadBlsKeyWithPassPhrase(*blsKeyFile, blsPassphrase)
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "ERROR when loading bls key, err :%v\n", err)
+			fmt.Fprintf(os.Stderr, "ERROR when loading bls key, err :%v\n", err)
 			os.Exit(100)
 		}
 		multibls.AppendPriKey(consensusMultiPriKey, consensusPriKey)
@@ -300,7 +347,7 @@ func setupConsensusKey(nodeConfig *nodeconfig.ConfigType) multibls.PublicKey {
 	} else {
 		err := readMultiBlsKeys(consensusMultiPriKey, consensusMultiPubKey)
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "ERROR when loading bls keys, err :%v\n", err)
+			fmt.Fprintf(os.Stderr, "[Multi-BLS] ERROR when loading bls keys, err :%v\n", err)
 			os.Exit(100)
 		}
 	}
@@ -355,14 +402,14 @@ func createGlobalConfig() (*nodeconfig.ConfigType, error) {
 	nodeConfig.DBDir = *dbDir
 
 	if p := *webHookYamlPath; p != "" {
-		config, err := slash.NewDoubleSignWebHooksFromPath(p)
+		config, err := webhooks.NewWebHooksFromPath(p)
 		if err != nil {
 			fmt.Fprintf(
 				os.Stderr, "yaml path is bad: %s", p,
 			)
 			os.Exit(1)
 		}
-		nodeConfig.WebHooks.DoubleSigning = config
+		nodeConfig.WebHooks.Hooks = config
 	}
 
 	return nodeConfig, nil
@@ -372,14 +419,11 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 	// Consensus object.
 	// TODO: consensus object shouldn't start here
 	// TODO(minhdoan): During refactoring, found out that the peers list is actually empty. Need to clean up the logic of consensus later.
-	decider := quorum.NewDecider(quorum.SuperMajorityVote)
+	decider := quorum.NewDecider(quorum.SuperMajorityVote, uint32(*shardID))
 
 	currentConsensus, err := consensus.New(
 		myHost, nodeConfig.ShardID, p2p.Peer{}, nodeConfig.ConsensusPriKey, decider,
 	)
-	currentConsensus.Decider.SetShardIDProvider(func() (uint32, error) {
-		return currentConsensus.ShardID, nil
-	})
 	currentConsensus.Decider.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
 		return currentConsensus.PubKey, nil
 	})
@@ -414,7 +458,7 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 	// Current node.
 	chainDBFactory := &shardchain.LDBFactory{RootDir: nodeConfig.DBDir}
 
-	currentNode := node.New(myHost, currentConsensus, chainDBFactory, blacklist, true)
+	currentNode := node.New(myHost, currentConsensus, chainDBFactory, blacklist, *isArchival)
 
 	switch {
 	case *networkType == nodeconfig.Localnet:
@@ -439,7 +483,7 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 
 	// TODO: refactor the creation of blockchain out of node.New()
 	currentConsensus.ChainReader = currentNode.Blockchain()
-
+	currentNode.NodeConfig.DNSZone = *dnsZone
 	// Set up prometheus pushgateway for metrics monitoring serivce.
 	currentNode.NodeConfig.SetPushgatewayIP(nodeConfig.PushgatewayIP)
 	currentNode.NodeConfig.SetPushgatewayPort(nodeConfig.PushgatewayPort)
@@ -568,20 +612,23 @@ func main() {
 		shard.Schedule = shardingconfig.PangaeaSchedule
 	case nodeconfig.Localnet:
 		shard.Schedule = shardingconfig.LocalnetSchedule
+	case nodeconfig.Partner:
+		shard.Schedule = shardingconfig.PartnerSchedule
+	case nodeconfig.Stressnet:
+		shard.Schedule = shardingconfig.StressNetSchedule
 	case nodeconfig.Devnet:
-		shard.Schedule = shardingconfig.TestnetSchedule // config specific for partner network (3-9-20)
-		//if *devnetHarmonySize < 0 {
-		//	*devnetHarmonySize = *devnetShardSize
-		//}
-		//// TODO (leo): use a passing list of accounts here
-		//devnetConfig, err := shardingconfig.NewInstance(
-		//	uint32(*devnetNumShards), *devnetShardSize, *devnetHarmonySize, genesis.HarmonyAccounts, genesis.FoundationalNodeAccounts, nil, shardingconfig.VLBPE)
-		//if err != nil {
-		//	_, _ = fmt.Fprintf(os.Stderr, "ERROR invalid devnet sharding config: %s",
-		//		err)
-		//	os.Exit(1)
-		//}
-		//shard.Schedule = shardingconfig.NewFixedSchedule(devnetConfig)
+		if *devnetHarmonySize < 0 {
+			*devnetHarmonySize = *devnetShardSize
+		}
+		// TODO (leo): use a passing list of accounts here
+		devnetConfig, err := shardingconfig.NewInstance(
+			uint32(*devnetNumShards), *devnetShardSize, *devnetHarmonySize, numeric.OneDec(), genesis.HarmonyAccounts, genesis.FoundationalNodeAccounts, nil, shardingconfig.VLBPE)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "ERROR invalid devnet sharding config: %s",
+				err)
+			os.Exit(1)
+		}
+		shard.Schedule = shardingconfig.NewFixedSchedule(devnetConfig)
 	default:
 		_, _ = fmt.Fprintf(os.Stderr, "invalid network type: %#v\n", *networkType)
 		os.Exit(2)

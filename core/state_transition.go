@@ -20,6 +20,9 @@ import (
 	"math"
 	"math/big"
 
+	staking2 "github.com/harmony-one/harmony/staking"
+	"github.com/harmony-one/harmony/staking/network"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/harmony-one/harmony/core/types"
@@ -291,7 +294,6 @@ func (st *StateTransition) StakingTransitionDb() (usedGas uint64, err error) {
 	homestead := st.evm.ChainConfig().IsS3(st.evm.EpochNumber) // s3 includes homestead
 
 	// Pay intrinsic gas
-	// TODO: propose staking-specific formula for staking transaction
 	gas, err := IntrinsicGas(st.data, false, homestead, msg.Type() == types.StakeCreateVal)
 
 	if err != nil {
@@ -310,7 +312,8 @@ func (st *StateTransition) StakingTransitionDb() (usedGas uint64, err error) {
 		if err = rlp.DecodeBytes(msg.Data(), stkMsg); err != nil {
 			return 0, err
 		}
-		utils.Logger().Info().Msgf("[DEBUG STAKING] staking type: %s, gas: %d, txn: %+v", msg.Type(), gas, stkMsg)
+		utils.Logger().Info().
+			Msgf("[DEBUG STAKING] staking type: %s, gas: %d, txn: %+v", msg.Type(), gas, stkMsg)
 		if msg.From() != stkMsg.ValidatorAddress {
 			return 0, errInvalidSigner
 		}
@@ -320,7 +323,8 @@ func (st *StateTransition) StakingTransitionDb() (usedGas uint64, err error) {
 		if err = rlp.DecodeBytes(msg.Data(), stkMsg); err != nil {
 			return 0, err
 		}
-		utils.Logger().Info().Msgf("[DEBUG STAKING] staking type: %s, gas: %d, txn: %+v", msg.Type(), gas, stkMsg)
+		utils.Logger().Info().
+			Msgf("[DEBUG STAKING] staking type: %s, gas: %d, txn: %+v", msg.Type(), gas, stkMsg)
 		if msg.From() != stkMsg.ValidatorAddress {
 			return 0, errInvalidSigner
 		}
@@ -354,7 +358,15 @@ func (st *StateTransition) StakingTransitionDb() (usedGas uint64, err error) {
 		if msg.From() != stkMsg.DelegatorAddress {
 			return 0, errInvalidSigner
 		}
-		err = st.verifyAndApplyCollectRewards(stkMsg)
+		collectedRewards, err := st.verifyAndApplyCollectRewards(stkMsg)
+		if err == nil {
+			st.state.AddLog(&types.Log{
+				Address:     stkMsg.DelegatorAddress,
+				Topics:      []common.Hash{staking2.CollectRewardsTopic},
+				Data:        collectedRewards.Bytes(),
+				BlockNumber: st.evm.BlockNumber.Uint64(),
+			})
+		}
 	default:
 		return 0, staking.ErrInvalidStakingKind
 	}
@@ -369,14 +381,17 @@ func (st *StateTransition) StakingTransitionDb() (usedGas uint64, err error) {
 func (st *StateTransition) verifyAndApplyCreateValidatorTx(
 	createValidator *staking.CreateValidator, blockNum *big.Int,
 ) error {
-	wrapper, err := VerifyAndCreateValidatorFromMsg(st.state, st.evm.EpochNumber, blockNum, createValidator)
+
+	wrapper, err := VerifyAndCreateValidatorFromMsg(
+		st.state, st.evm.EpochNumber, blockNum, createValidator,
+	)
 	if err != nil {
 		return err
 	}
-	if err := st.state.UpdateValidatorWrapper(wrapper.Validator.Address, wrapper); err != nil {
+	if err := st.state.UpdateValidatorWrapper(wrapper.Address, wrapper); err != nil {
 		return err
 	}
-	st.state.SetValidatorFlag(wrapper.Validator.Address)
+	st.state.SetValidatorFlag(wrapper.Address)
 	st.state.SubBalance(wrapper.Address, createValidator.Amount)
 	return nil
 }
@@ -384,7 +399,9 @@ func (st *StateTransition) verifyAndApplyCreateValidatorTx(
 func (st *StateTransition) verifyAndApplyEditValidatorTx(
 	editValidator *staking.EditValidator, blockNum *big.Int,
 ) error {
-	wrapper, err := VerifyAndEditValidatorFromMsg(st.state, st.bc, blockNum, editValidator)
+	wrapper, err := VerifyAndEditValidatorFromMsg(
+		st.state, st.bc, st.evm.EpochNumber, blockNum, editValidator,
+	)
 	if err != nil {
 		return err
 	}
@@ -396,40 +413,42 @@ func (st *StateTransition) verifyAndApplyDelegateTx(delegate *staking.Delegate) 
 	if err != nil {
 		return err
 	}
-	if err := st.state.UpdateValidatorWrapper(wrapper.Validator.Address, wrapper); err != nil {
-		return err
-	}
+
 	st.state.SubBalance(delegate.DelegatorAddress, balanceToBeDeducted)
-	return nil
+
+	return st.state.UpdateValidatorWrapper(wrapper.Address, wrapper)
 }
 
-func (st *StateTransition) verifyAndApplyUndelegateTx(undelegate *staking.Undelegate) error {
+func (st *StateTransition) verifyAndApplyUndelegateTx(
+	undelegate *staking.Undelegate,
+) error {
 	wrapper, err := VerifyAndUndelegateFromMsg(st.state, st.evm.EpochNumber, undelegate)
 	if err != nil {
 		return err
 	}
-	return st.state.UpdateValidatorWrapper(wrapper.Validator.Address, wrapper)
+	return st.state.UpdateValidatorWrapper(wrapper.Address, wrapper)
 }
 
-func (st *StateTransition) verifyAndApplyCollectRewards(collectRewards *staking.CollectRewards) error {
+func (st *StateTransition) verifyAndApplyCollectRewards(collectRewards *staking.CollectRewards) (*big.Int, error) {
 	if st.bc == nil {
-		return errors.New("[CollectRewards] No chain context provided")
+		return network.NoReward, errors.New("[CollectRewards] No chain context provided")
 	}
+	// TODO(audit): make sure the delegation index is always consistent with onchain data
 	delegations, err := st.bc.ReadDelegationsByDelegator(collectRewards.DelegatorAddress)
 	if err != nil {
-		return err
+		return network.NoReward, err
 	}
 	updatedValidatorWrappers, totalRewards, err := VerifyAndCollectRewardsFromDelegation(
 		st.state, delegations,
 	)
 	if err != nil {
-		return err
+		return network.NoReward, err
 	}
 	for _, wrapper := range updatedValidatorWrappers {
-		if err := st.state.UpdateValidatorWrapper(wrapper.Validator.Address, wrapper); err != nil {
-			return err
+		if err := st.state.UpdateValidatorWrapper(wrapper.Address, wrapper); err != nil {
+			return network.NoReward, err
 		}
 	}
 	st.state.AddBalance(collectRewards.DelegatorAddress, totalRewards)
-	return nil
+	return totalRewards, nil
 }

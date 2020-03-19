@@ -20,7 +20,9 @@ func (consensus *Consensus) didReachPrepareQuorum() error {
 		return err
 	}
 	// Construct and broadcast prepared message
-	networkMessage, err := consensus.construct(msg_pb.MessageType_PREPARED, nil, consensus.LeaderPubKey, leaderPriKey)
+	networkMessage, err := consensus.construct(
+		msg_pb.MessageType_PREPARED, nil, consensus.LeaderPubKey, leaderPriKey,
+	)
 	if err != nil {
 		consensus.getLogger().Err(err).
 			Str("message-type", msg_pb.MessageType_PREPARED.String()).
@@ -35,6 +37,7 @@ func (consensus *Consensus) didReachPrepareQuorum() error {
 	consensus.aggregatedPrepareSig = aggSig
 	consensus.FBFTLog.AddMessage(FBFTMsg)
 	// Leader add commit phase signature
+	// TODO(audit): sign signature on hash+blockNum+viewID (add a hard fork)
 	blockNumHash := [8]byte{}
 	binary.LittleEndian.PutUint64(blockNumHash[:], consensus.blockNum)
 	commitPayload := append(blockNumHash[:], consensus.blockHash[:]...)
@@ -42,12 +45,16 @@ func (consensus *Consensus) didReachPrepareQuorum() error {
 	// so by this point, everyone has committed to the blockhash of this block
 	// in prepare and so this is the actual block.
 	for i, key := range consensus.PubKey.PublicKey {
-		consensus.Decider.SubmitVote(
+		if _, err := consensus.Decider.SubmitVote(
 			quorum.Commit,
 			key,
 			consensus.priKey.PrivateKey[i].SignHash(commitPayload),
 			common.BytesToHash(consensus.blockHash[:]),
-		)
+			consensus.blockNum,
+			consensus.viewID,
+		); err != nil {
+			return err
+		}
 
 		if err := consensus.commitBitmap.SetKey(key, true); err != nil {
 			consensus.getLogger().Debug().Msg("[OnPrepare] Leader commit bitmap set failed")

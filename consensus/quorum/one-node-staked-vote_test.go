@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"testing"
 
+	shardingconfig "github.com/harmony-one/harmony/internal/configs/sharding"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/harmony-one/bls/ffi/go/bls"
 	"github.com/harmony-one/harmony/numeric"
@@ -29,7 +31,8 @@ var (
 type secretKeyMap map[shard.BlsPublicKey]bls.SecretKey
 
 func init() {
-	basicDecider = NewDecider(SuperMajorityStake)
+	basicDecider = NewDecider(SuperMajorityStake, shard.BeaconChainShardID)
+	shard.Schedule = shardingconfig.LocalnetSchedule
 }
 
 func generateRandomSlot() (shard.Slot, bls.SecretKey) {
@@ -46,9 +49,9 @@ func generateRandomSlot() (shard.Slot, bls.SecretKey) {
 // 50 Harmony Nodes, 50 Staked Nodes
 func setupBaseCase() (Decider, *TallyResult, shard.SlotList, map[string]secretKeyMap) {
 	slotList := shard.SlotList{}
-	sKeys := make(map[string]secretKeyMap)
-	sKeys[hmy] = make(secretKeyMap)
-	sKeys[reg] = make(secretKeyMap)
+	sKeys := map[string]secretKeyMap{}
+	sKeys[hmy] = secretKeyMap{}
+	sKeys[reg] = secretKeyMap{}
 	pubKeys := []*bls.PublicKey{}
 
 	for i := 0; i < quorumNodes; i++ {
@@ -63,10 +66,11 @@ func setupBaseCase() (Decider, *TallyResult, shard.SlotList, map[string]secretKe
 		pubKeys = append(pubKeys, sKey.GetPublicKey())
 	}
 
-	decider := NewDecider(SuperMajorityStake)
-	decider.SetShardIDProvider(func() (uint32, error) { return 0, nil })
+	decider := NewDecider(SuperMajorityStake, shard.BeaconChainShardID)
 	decider.UpdateParticipants(pubKeys)
-	tally, err := decider.SetVoters(slotList)
+	tally, err := decider.SetVoters(&shard.Committee{
+		shard.BeaconChainShardID, slotList,
+	}, big.NewInt(3))
 	if err != nil {
 		panic("Unable to SetVoters for Base Case")
 	}
@@ -76,7 +80,7 @@ func setupBaseCase() (Decider, *TallyResult, shard.SlotList, map[string]secretKe
 // 33 Harmony Nodes, 67 Staked Nodes
 func setupEdgeCase() (Decider, *TallyResult, shard.SlotList, secretKeyMap) {
 	slotList := shard.SlotList{}
-	sKeys := make(secretKeyMap)
+	sKeys := secretKeyMap{}
 	pubKeys := []*bls.PublicKey{}
 
 	for i := 0; i < quorumNodes; i++ {
@@ -89,10 +93,11 @@ func setupEdgeCase() (Decider, *TallyResult, shard.SlotList, secretKeyMap) {
 		pubKeys = append(pubKeys, sKey.GetPublicKey())
 	}
 
-	decider := NewDecider(SuperMajorityStake)
-	decider.SetShardIDProvider(func() (uint32, error) { return 0, nil })
+	decider := NewDecider(SuperMajorityStake, shard.BeaconChainShardID)
 	decider.UpdateParticipants(pubKeys)
-	tally, err := decider.SetVoters(slotList)
+	tally, err := decider.SetVoters(&shard.Committee{
+		shard.BeaconChainShardID, slotList,
+	}, big.NewInt(3))
 	if err != nil {
 		panic("Unable to SetVoters for Edge Case")
 	}
@@ -104,7 +109,7 @@ func sign(d Decider, k secretKeyMap, p Phase) {
 		pubKey := v.GetPublicKey()
 		sig := v.Sign(msg)
 		// TODO Make upstream test provide meaningful test values
-		d.SubmitVote(p, pubKey, sig, common.Hash{})
+		d.SubmitVote(p, pubKey, sig, common.Hash{}, 0, 0)
 	}
 }
 

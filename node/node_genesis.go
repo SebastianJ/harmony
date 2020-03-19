@@ -51,14 +51,13 @@ func (gi *genesisInitializer) InitChainDB(db ethdb.Database, shardID uint32) err
 	if shardState == nil {
 		return errors.New("failed to create genesis shard state")
 	}
-
 	if shardID != shard.BeaconChainShardID {
 		// store only the local shard for shard chains
-		c := shardState.FindCommitteeByID(shardID)
-		if c == nil {
+		subComm, err := shardState.FindCommitteeByID(shardID)
+		if err != nil {
 			return errors.New("cannot find local shard in genesis")
 		}
-		shardState = &shard.State{nil, []shard.Committee{*c}}
+		shardState = &shard.State{nil, []shard.Committee{*subComm}}
 	}
 	gi.node.SetupGenesisBlock(db, shardID, shardState)
 	return nil
@@ -74,10 +73,12 @@ func (node *Node) SetupGenesisBlock(db ethdb.Database, shardID uint32, myShardSt
 	// Initialize genesis block and blockchain
 
 	genesisAlloc := make(core.GenesisAlloc)
-	chainConfig := *params.TestnetChainConfig
+	chainConfig := params.ChainConfig{}
 	gasLimit := params.GenesisGasLimit
 
-	switch node.NodeConfig.GetNetworkType() {
+	netType := node.NodeConfig.GetNetworkType()
+
+	switch netType {
 	case nodeconfig.Mainnet:
 		chainConfig = *params.MainnetChainConfig
 		if shardID == 0 {
@@ -86,16 +87,28 @@ func (node *Node) SetupGenesisBlock(db ethdb.Database, shardID uint32, myShardSt
 		}
 	case nodeconfig.Pangaea:
 		chainConfig = *params.PangaeaChainConfig
-		fallthrough // the rest is the same as testnet
+	case nodeconfig.Partner:
+		chainConfig = *params.PartnerChainConfig
+	case nodeconfig.Stressnet:
+		chainConfig = *params.StressnetChainConfig
 	default: // all other types share testnet config
-		// Test accounts
+		chainConfig = *params.TestChainConfig
+	}
+
+	// All non-mainnet chains get test accounts
+	if netType != nodeconfig.Mainnet {
 		node.AddTestingAddresses(genesisAlloc, TestAccountNumber)
 		gasLimit = params.TestGenesisGasLimit
 		// Smart contract deployer account used to deploy initial smart contract
-		contractDeployerKey, _ := ecdsa.GenerateKey(crypto.S256(), strings.NewReader("Test contract key string stream that is fixed so that generated test key are deterministic every time"))
+		contractDeployerKey, _ := ecdsa.GenerateKey(
+			crypto.S256(),
+			strings.NewReader("Test contract key string stream that is fixed so that generated test key are deterministic every time"),
+		)
 		contractDeployerAddress := crypto.PubkeyToAddress(contractDeployerKey.PublicKey)
 		contractDeployerFunds := big.NewInt(ContractDeployerInitFund)
-		contractDeployerFunds = contractDeployerFunds.Mul(contractDeployerFunds, big.NewInt(denominations.One))
+		contractDeployerFunds = contractDeployerFunds.Mul(
+			contractDeployerFunds, big.NewInt(denominations.One),
+		)
 		genesisAlloc[contractDeployerAddress] = core.GenesisAccount{Balance: contractDeployerFunds}
 		node.ContractDeployerKey = contractDeployerKey
 	}

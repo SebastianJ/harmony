@@ -130,23 +130,44 @@ func (w *Worker) CommitTransactions(
 	// STAKING - only beaconchain process staking transaction
 	if w.chain.ShardID() == shard.BeaconChainShardID {
 		for _, tx := range pendingStaking {
+			// TODO: merge staking transaction processing with normal transaction processing.
+			// <<THESE CODE ARE DUPLICATED AS ABOVE
+			// If we don't have enough gas for any further transactions then we're done
+			if w.current.gasPool.Gas() < params.TxGas {
+				utils.Logger().Info().Uint64("have", w.current.gasPool.Gas()).Uint64("want", params.TxGas).Msg("Not enough gas for further transactions")
+				break
+			}
+			// Check whether the tx is replay protected. If we're not in the EIP155 hf
+			// phase, start ignoring the sender until we do.
+			if tx.Protected() && !w.config.IsEIP155(w.current.header.Number()) {
+				utils.Logger().Info().Str("hash", tx.Hash().Hex()).Str("eip155Epoch", w.config.EIP155Epoch.String()).Msg("Ignoring reply protected transaction")
+				txs.Pop()
+				continue
+			}
+
+			// Start executing the transaction
+			w.current.state.Prepare(tx.Hash(), common.Hash{}, len(w.current.txs))
+			// THESE CODE ARE DUPLICATED AS ABOVE>>
+
 			logs, err := w.commitStakingTransaction(tx, coinbase)
 			if err != nil {
 				txID := tx.Hash().Hex()
 				utils.Logger().Error().Err(err).
-					Str("stakingTxId", txID).
-					Msg("Commit staking transaction error")
+					Str("stakingTxID", txID).
+					Interface("stakingTx", tx).
+					Msg("Failed committing staking transaction")
 			} else {
 				coalescedLogs = append(coalescedLogs, logs...)
 				utils.Logger().Info().Str("stakingTxId", tx.Hash().Hex()).
 					Uint64("txGasLimit", tx.Gas()).
-					Msg("StakingTransaction gas limit info")
+					Msg("Successfully committed staking transaction")
 			}
 		}
 	}
 
 	utils.Logger().Info().
 		Int("newTxns", len(w.current.txs)).
+		Int("newStakingTxns", len(w.current.stakingTxs)).
 		Uint64("blockGasLimit", w.current.header.GasLimit()).
 		Uint64("blockGasUsed", w.current.header.GasUsed()).
 		Msg("Block gas limit and usage info")
@@ -217,7 +238,7 @@ func (w *Worker) CommitReceipts(receiptsList []*types.CXReceiptsProof) error {
 	for _, cx := range receiptsList {
 		err := core.ApplyIncomingReceipt(w.config, w.current.state, w.current.header, cx)
 		if err != nil {
-			return ctxerror.New("cannot apply receiptsList").WithCause(err)
+			return ctxerror.New("Failed applying cross-shard receipts").WithCause(err)
 		}
 	}
 
@@ -306,31 +327,29 @@ func (w *Worker) IncomingReceipts() []*types.CXReceiptsProof {
 	return w.current.incxs
 }
 
-// CollectAndVerifySlashes ..
-func (w *Worker) CollectAndVerifySlashes() error {
-	allSlashing, err := w.chain.ReadPendingSlashingCandidates()
-	if err != nil {
-		return err
+// CollectVerifiedSlashes sets w.current.slashes only to those that
+// past verification
+func (w *Worker) CollectVerifiedSlashes() error {
+	pending, failures :=
+		w.chain.ReadPendingSlashingCandidates(), slash.Records{}
+	if d := pending; len(d) > 0 {
+		pending, failures = w.verifySlashes(d)
 	}
-	if d := allSlashing; len(d) > 0 {
-		// TODO add specific error which is
-		// "could not verify slash", which should not return as err
-		// and therefore stop the block proposal
-		if allSlashing, err = w.VerifyAll(d); err != nil {
-			utils.Logger().Err(err).
-				RawJSON("slashes", []byte(d.String())).
-				Msg("could not verify slashes proposed")
+
+	if f := failures; len(f) > 0 {
+		if err := w.chain.DeleteFromPendingSlashingCandidates(f); err != nil {
 			return err
 		}
 	}
-	w.current.slashes = allSlashing
+	w.current.slashes = pending
 	return nil
 }
 
-// VerifyAll ..
-func (w *Worker) VerifyAll(allSlashing []slash.Record) ([]slash.Record, error) {
-	d := allSlashing
-	slashingToPropose := []slash.Record{}
+// returns (successes, failures, error)
+func (w *Worker) verifySlashes(
+	d slash.Records,
+) (slash.Records, slash.Records) {
+	successes, failures := slash.Records{}, slash.Records{}
 	// Enforce order, reproducibility
 	sort.SliceStable(d,
 		func(i, j int) bool {
@@ -340,16 +359,28 @@ func (w *Worker) VerifyAll(allSlashing []slash.Record) ([]slash.Record, error) {
 		},
 	)
 
-	for i := range d {
-		if err := slash.Verify(w.chain, &d[i]); err != nil {
-			return nil, err
-		}
-		slashingToPropose = append(slashingToPropose, d[i])
+	// Always base the state on current tip of the chain
+	workingState, err := w.chain.State()
+	if err != nil {
+		return successes, failures
 	}
-	count := len(slashingToPropose)
-	utils.Logger().Info().
-		Msgf("set into propose headers %d slashing record", count)
-	return slashingToPropose, nil
+
+	for i := range d {
+		if err := slash.Verify(
+			w.chain, workingState, &d[i],
+		); err != nil {
+			failures = append(failures, d[i])
+		}
+		successes = append(successes, d[i])
+	}
+
+	if f := len(failures); f > 0 {
+		utils.Logger().Debug().
+			Int("count", f).
+			Msg("invalid slash records passed over in block proposal")
+	}
+
+	return successes, failures
 }
 
 // FinalizeNewBlock generate a new block for the next consensus round.
@@ -357,7 +388,9 @@ func (w *Worker) FinalizeNewBlock(
 	sig []byte, signers []byte, viewID uint64, coinbase common.Address,
 	crossLinks types.CrossLinks, shardState *shard.State,
 ) (*types.Block, error) {
+	// Put sig, signers, viewID, coinbase into header
 	if len(sig) > 0 && len(signers) > 0 {
+		// TODO: directly set signature into lastCommitSignature
 		sig2 := w.current.header.LastCommitSignature()
 		copy(sig2[:], sig[:])
 		w.current.header.SetLastCommitSignature(sig2)
@@ -366,7 +399,7 @@ func (w *Worker) FinalizeNewBlock(
 	w.current.header.SetCoinbase(coinbase)
 	w.current.header.SetViewID(new(big.Int).SetUint64(viewID))
 
-	// Cross Links
+	// Put crosslinks into header
 	if len(crossLinks) > 0 {
 		crossLinks.Sort()
 		crossLinkData, err := rlp.EncodeToBytes(crossLinks)
@@ -384,13 +417,13 @@ func (w *Worker) FinalizeNewBlock(
 		utils.Logger().Debug().Msg("Zero crosslinks to finalize")
 	}
 
+	// Put slashes into header
 	if w.config.IsStaking(w.current.header.Epoch()) {
 		doubleSigners := w.current.slashes
 		if len(doubleSigners) > 0 {
 			if data, err := rlp.EncodeToBytes(doubleSigners); err == nil {
 				w.current.header.SetSlashes(data)
 				utils.Logger().Info().
-					RawJSON("slashes", []byte(doubleSigners.String())).
 					Msg("encoded slashes into headers of proposed new block")
 			} else {
 				utils.Logger().Debug().Err(err).Msg("Failed to encode proposed slashes")
@@ -399,7 +432,7 @@ func (w *Worker) FinalizeNewBlock(
 		}
 	}
 
-	// Shard State
+	// Put shard state into header
 	if shardState != nil && len(shardState.Shards) != 0 {
 		//we store shardstatehash in header only before prestaking epoch (header v0,v1,v2)
 		if !w.config.IsPreStaking(w.current.header.Epoch()) {
@@ -435,7 +468,9 @@ func (w *Worker) FinalizeNewBlock(
 }
 
 // New create a new worker object.
-func New(config *params.ChainConfig, chain *core.BlockChain, engine consensus_engine.Engine) *Worker {
+func New(
+	config *params.ChainConfig, chain *core.BlockChain, engine consensus_engine.Engine,
+) *Worker {
 	worker := &Worker{
 		config:  config,
 		factory: blockfactory.NewFactory(config),

@@ -97,9 +97,11 @@ func (consensus *Consensus) handleMessageUpdate(payload []byte) {
 		intendedForLeader &&
 		consensus.leaderSanityChecks(msg):
 		consensus.onCommit(msg)
-	case t == msg_pb.MessageType_VIEWCHANGE:
+	case t == msg_pb.MessageType_VIEWCHANGE &&
+		consensus.viewChangeSanityCheck(msg):
 		consensus.onViewChange(msg)
-	case t == msg_pb.MessageType_NEWVIEW:
+	case t == msg_pb.MessageType_NEWVIEW &&
+		consensus.viewChangeSanityCheck(msg):
 		consensus.onNewView(msg)
 	}
 }
@@ -229,7 +231,9 @@ func (consensus *Consensus) tryCatchup() {
 	consensus.getLogger().Info().Msg("[TryCatchup] commit new blocks")
 	currentBlockNum := consensus.blockNum
 	for {
-		msgs := consensus.FBFTLog.GetMessagesByTypeSeq(msg_pb.MessageType_COMMITTED, consensus.blockNum)
+		msgs := consensus.FBFTLog.GetMessagesByTypeSeq(
+			msg_pb.MessageType_COMMITTED, consensus.blockNum,
+		)
 		if len(msgs) == 0 {
 			break
 		}
@@ -242,6 +246,15 @@ func (consensus *Consensus) tryCatchup() {
 
 		block := consensus.FBFTLog.GetBlockByHash(msgs[0].BlockHash)
 		if block == nil {
+			blksRepr, msgsRepr, incomingMsg :=
+				consensus.FBFTLog.Blocks().String(),
+				consensus.FBFTLog.Messages().String(),
+				msgs[0].String()
+			consensus.getLogger().Debug().
+				Str("FBFT-log-blocks", blksRepr).
+				Str("FBFT-log-messages", msgsRepr).
+				Str("incoming-message", incomingMsg).
+				Msg("block was nil invariant in consensus violated")
 			break
 		}
 

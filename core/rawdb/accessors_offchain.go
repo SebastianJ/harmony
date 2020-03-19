@@ -106,6 +106,7 @@ func DeletePendingCrossLinks(db DatabaseDeleter) error {
 }
 
 // ReadPendingSlashingCandidates retrieves last pending slashing candidates
+// TODO(audit): the pending slashes written in DB is never used.
 func ReadPendingSlashingCandidates(db DatabaseReader) ([]byte, error) {
 	return db.Get(pendingSlashingKey)
 }
@@ -205,20 +206,23 @@ func DeleteValidatorSnapshot(db DatabaseDeleter, addr common.Address, epoch *big
 	}
 }
 
-// ReadValidatorStats retrieves validator's stats by its address
+// DeleteValidatorStats ..
+func DeleteValidatorStats(db DatabaseDeleter, addr common.Address) {
+	if err := db.Delete(validatorStatsKey(addr)); err != nil {
+		utils.Logger().Error().Msg("Failed to delete stats of a validator")
+	}
+}
+
+// ReadValidatorStats retrieves validator's stats by its address,
 func ReadValidatorStats(
 	db DatabaseReader, addr common.Address,
 ) (*staking.ValidatorStats, error) {
 	data, err := db.Get(validatorStatsKey(addr))
-	if err != nil || len(data) == 0 {
-		utils.Logger().Info().Err(err).Msg("ReadValidatorStats")
+	if err != nil {
 		return nil, err
 	}
 	stats := staking.ValidatorStats{}
 	if err := rlp.DecodeBytes(data, &stats); err != nil {
-		utils.Logger().Error().Err(err).
-			Str("address", addr.Hex()).
-			Msg("Unable to decode validator stats from database")
 		return nil, err
 	}
 	return &stats, nil
@@ -260,8 +264,11 @@ func ReadValidatorList(db DatabaseReader, electedOnly bool) ([]common.Address, e
 }
 
 // WriteValidatorList stores staking validator's information by its address
-// Writes only for elected validators if electedOnly==true, otherwise, writes for all validators
-func WriteValidatorList(db DatabaseWriter, addrs []common.Address, electedOnly bool) error {
+// Writes only for elected validators
+// if electedOnly==true, otherwise, writes for all validators
+func WriteValidatorList(
+	db DatabaseWriter, addrs []common.Address, electedOnly bool,
+) error {
 	key := validatorListKey
 	if electedOnly {
 		key = electedValidatorListKey
@@ -271,19 +278,16 @@ func WriteValidatorList(db DatabaseWriter, addrs []common.Address, electedOnly b
 	if err != nil {
 		utils.Logger().Error().Msg("[WriteValidatorList] Failed to encode")
 	}
-	if err := db.Put(key, bytes); err != nil {
-		utils.Logger().Error().Msg("[WriteValidatorList] Failed to store to database")
-	}
-	return err
+	return db.Put(key, bytes)
 }
 
 // ReadDelegationsByDelegator retrieves the list of validators delegated by a delegator
-func ReadDelegationsByDelegator(db DatabaseReader, delegator common.Address) ([]staking.DelegationIndex, error) {
+func ReadDelegationsByDelegator(db DatabaseReader, delegator common.Address) (staking.DelegationIndexes, error) {
 	data, err := db.Get(delegatorValidatorListKey(delegator))
 	if err != nil || len(data) == 0 {
-		return []staking.DelegationIndex{}, nil
+		return staking.DelegationIndexes{}, nil
 	}
-	addrs := []staking.DelegationIndex{}
+	addrs := staking.DelegationIndexes{}
 	if err := rlp.DecodeBytes(data, &addrs); err != nil {
 		utils.Logger().Error().Err(err).Msg("Unable to Decode delegations from database")
 		return nil, err
@@ -292,8 +296,8 @@ func ReadDelegationsByDelegator(db DatabaseReader, delegator common.Address) ([]
 }
 
 // WriteDelegationsByDelegator stores the list of validators delegated by a delegator
-func WriteDelegationsByDelegator(db DatabaseWriter, delegator common.Address, indices []staking.DelegationIndex) error {
-	bytes, err := rlp.EncodeToBytes(indices)
+func WriteDelegationsByDelegator(db DatabaseWriter, delegator common.Address, indexes staking.DelegationIndexes) error {
+	bytes, err := rlp.EncodeToBytes(indexes)
 	if err != nil {
 		utils.Logger().Error().Msg("[writeDelegationsByDelegator] Failed to encode")
 	}
