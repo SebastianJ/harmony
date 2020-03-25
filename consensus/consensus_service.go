@@ -278,6 +278,7 @@ func (consensus *Consensus) verifyViewChangeSenderKey(msg *msg_pb.Message) (*bls
 // SetViewID set the viewID to the height of the blockchain
 func (consensus *Consensus) SetViewID(height uint64) {
 	consensus.viewID = height
+	consensus.current.viewID = height
 }
 
 // SetMode sets the mode of consensus
@@ -465,18 +466,15 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 	curHeader := consensus.ChainReader.CurrentHeader()
 	curEpoch := curHeader.Epoch()
 	nextEpoch := new(big.Int).Add(curHeader.Epoch(), common.Big1)
-	prevSubCommitteeDump := consensus.Decider.String()
-
 	isFirstTimeStaking := consensus.ChainReader.Config().IsStaking(nextEpoch) &&
 		len(curHeader.ShardState()) > 0 &&
 		!consensus.ChainReader.Config().IsStaking(curEpoch)
-
 	haventUpdatedDecider := consensus.ChainReader.Config().IsStaking(curEpoch) &&
 		consensus.Decider.Policy() != quorum.SuperMajorityStake
 
 	// Only happens once, the flip-over to a new Decider policy
 	if isFirstTimeStaking || haventUpdatedDecider {
-		decider := quorum.NewDecider(quorum.SuperMajorityStake)
+		decider := quorum.NewDecider(quorum.SuperMajorityStake, consensus.ShardID)
 		decider.SetMyPublicKeyProvider(func() (*multibls.PublicKey, error) {
 			return consensus.PubKey, nil
 		})
@@ -484,8 +482,8 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 	}
 
 	committeeToSet := &shard.Committee{}
+	epochToSet := curEpoch
 	hasError := false
-
 	curShardState, err := committee.WithStakingEnabled.ReadFromDB(
 		curEpoch, consensus.ChainReader,
 	)
@@ -526,7 +524,7 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 		}
 
 		committeeToSet = subComm
-
+		epochToSet = nextEpoch
 	} else {
 		consensus.SetEpochNum(curEpoch.Uint64())
 		subComm, err := curShardState.FindCommitteeByID(curHeader.ShardID())
@@ -549,9 +547,8 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 
 	// update public keys in the committee
 	oldLeader := consensus.LeaderPubKey
-	pubKeys, _ := committee.WithStakingEnabled.GetCommitteePublicKeys(
-		committeeToSet,
-	)
+	pubKeys, _ := committeeToSet.BLSPublicKeys()
+
 	consensus.getLogger().Info().
 		Int("numPubKeys", len(pubKeys)).
 		Msg("[UpdateConsensusInformation] Successfully updated public keys")
@@ -559,7 +556,7 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 
 	// Update voters in the committee
 	if _, err := consensus.Decider.SetVoters(
-		committeeToSet.Slots,
+		committeeToSet, epochToSet,
 	); err != nil {
 		utils.Logger().Error().
 			Err(err).
@@ -572,8 +569,6 @@ func (consensus *Consensus) UpdateConsensusInformation() Mode {
 		Uint64("block-number", curHeader.Number().Uint64()).
 		Uint64("curEpoch", curHeader.Epoch().Uint64()).
 		Uint32("shard-id", consensus.ShardID).
-		RawJSON("prev-subcommittee", []byte(prevSubCommitteeDump)).
-		RawJSON("current-subcommittee", []byte(consensus.Decider.String())).
 		Msg("[UpdateConsensusInformation] changing committee")
 
 	// take care of possible leader change during the curEpoch

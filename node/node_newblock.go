@@ -84,9 +84,15 @@ func (node *Node) WaitForConsensusReadyV2(readySignal chan struct{}, stopChan ch
 }
 
 func (node *Node) proposeNewBlock() (*types.Block, error) {
+	currentHeader := node.Blockchain().CurrentHeader()
+	nowEpoch, blockNow := currentHeader.Epoch(), currentHeader.Number()
+	utils.AnalysisStart("proposeNewBlock", nowEpoch, blockNow)
+	defer utils.AnalysisEnd("proposeNewBlock", nowEpoch, blockNow)
+
 	node.Worker.UpdateCurrent()
 
-	// Update worker's current header and state data in preparation to propose/process new transactions
+	// Update worker's current header and
+	// state data in preparation to propose/process new transactions
 	var (
 		coinbase    = node.Consensus.SelfAddresses[node.Consensus.LeaderPubKey.SerializeToHexStr()]
 		beneficiary = coinbase
@@ -117,6 +123,8 @@ func (node *Node) proposeNewBlock() (*types.Block, error) {
 	}
 
 	// Prepare normal and staking transactions retrieved from transaction pool
+	utils.AnalysisStart("proposeNewBlockChooseFromTxnPool")
+
 	pendingPoolTxs, err := node.TxPool.Pending()
 	if err != nil {
 		utils.Logger().Err(err).Msg("Failed to fetch pending transactions")
@@ -144,6 +152,7 @@ func (node *Node) proposeNewBlock() (*types.Block, error) {
 			pendingPlainTxs[addr] = plainTxsPerAcc
 		}
 	}
+	utils.AnalysisEnd("proposeNewBlockChooseFromTxnPool")
 
 	// Try commit normal and staking transactions based on the current state
 	// The successfully committed transactions will be put in the proposed block
@@ -168,6 +177,7 @@ func (node *Node) proposeNewBlock() (*types.Block, error) {
 	isBeaconchainInStakingEra := node.NodeConfig.ShardID == shard.BeaconChainShardID &&
 		node.Blockchain().Config().IsStaking(node.Worker.GetCurrentHeader().Epoch())
 
+	utils.AnalysisStart("proposeNewBlockVerifyCrossLinks")
 	// Prepare cross links and slashing messages
 	var crossLinksToPropose types.CrossLinks
 	if isBeaconchainInCrossLinkEra {
@@ -202,6 +212,7 @@ func (node *Node) proposeNewBlock() (*types.Block, error) {
 		}
 		node.Blockchain().DeleteFromPendingCrossLinks(invalidToDelete)
 	}
+	utils.AnalysisEnd("proposeNewBlockVerifyCrossLinks")
 
 	if isBeaconchainInStakingEra {
 		// this will set a meaningful w.current.slashes

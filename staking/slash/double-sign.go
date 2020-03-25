@@ -101,8 +101,8 @@ func (e Evidence) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Moment
 		ConflictingBallots
-		ProposalHeader string `json:"header"`
-	}{e.Moment, e.ConflictingBallots, e.ProposalHeader.String()})
+		ProposalHeader *block.Header `json:"header"`
+	}{e.Moment, e.ConflictingBallots, e.ProposalHeader})
 }
 
 // Records ..
@@ -119,6 +119,7 @@ var (
 	errAlreadyBannedValidator  = errors.New("cannot slash on already banned validator")
 	errSignerKeyNotRightSize   = errors.New("bls keys from slash candidate not right side")
 	errSlashFromFutureEpoch    = errors.New("cannot have slash from future epoch")
+	errSlashBlockNoConflict    = errors.New("cannot slash for signing on non-conflicting blocks")
 )
 
 // MarshalJSON ..
@@ -160,7 +161,7 @@ func Verify(
 		return err
 	}
 
-	if wrapper.EPOSStatus == effective.Banned {
+	if wrapper.Status == effective.Banned {
 		return errAlreadyBannedValidator
 	}
 
@@ -177,6 +178,10 @@ func Verify(
 		return errors.Wrapf(
 			errSignerKeyNotRightSize, "cast key %d double-signed key %d", k1, k2,
 		)
+	}
+
+	if first.ViewID != second.ViewID || first.Height != second.Height || first.BlockHeaderHash == second.BlockHeaderHash {
+		return errors.Wrapf(errSlashBlockNoConflict, "first %v+ second %v+", first, second)
 	}
 
 	if shard.CompareBlsPublicKey(first.SignerPubKey, second.SignerPubKey) != 0 {
@@ -226,7 +231,7 @@ func Verify(
 		if err := signature.Deserialize(ballot.Signature); err != nil {
 			return err
 		}
-		if err := first.SignerPubKey.ToLibBLSPublicKey(publicKey); err != nil {
+		if err := ballot.SignerPubKey.ToLibBLSPublicKey(publicKey); err != nil {
 			return err
 		}
 
@@ -267,18 +272,18 @@ func (r Record) Hash() common.Hash {
 
 // SetDifference returns all the records that are in ys but not in r
 func (r Records) SetDifference(ys Records) Records {
-	diff := Records{}
-	xsHashed, ysHashed :=
-		make([]common.Hash, len(r)), make([]common.Hash, len(ys))
+	diff, set := Records{}, map[common.Hash]struct{}{}
 	for i := range r {
-		xsHashed[i] = r[i].Hash()
+		h := r[i].Hash()
+		if _, ok := set[h]; !ok {
+			set[h] = struct{}{}
+		}
 	}
+
 	for i := range ys {
-		ysHashed[i] = ys[i].Hash()
-		for j := range xsHashed {
-			if ysHashed[i] != xsHashed[j] {
-				diff = append(diff, ys[i])
-			}
+		h := ys[i].Hash()
+		if _, ok := set[h]; !ok {
+			diff = append(diff, ys[i])
 		}
 	}
 
@@ -459,7 +464,7 @@ func Apply(
 		}
 
 		// finally, kick them off forever
-		current.EPOSStatus = effective.Banned
+		current.Status = effective.Banned
 		utils.Logger().Info().
 			RawJSON("delegation-current", []byte(current.String())).
 			RawJSON("slash", []byte(slash.String())).

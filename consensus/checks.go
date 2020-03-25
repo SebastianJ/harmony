@@ -11,6 +11,11 @@ import (
 const MaxBlockNumDiff = 100
 
 func (consensus *Consensus) validatorSanityChecks(msg *msg_pb.Message) bool {
+	consensus.getLogger().Debug().
+		Uint64("blockNum", msg.GetConsensus().BlockNum).
+		Uint64("viewID", msg.GetConsensus().ViewId).
+		Str("msgType", msg.Type.String()).
+		Msg("[validatorSanityChecks] Checking new message")
 	senderKey, err := consensus.verifySenderKey(msg)
 	if err != nil {
 		if err == shard.ErrValidNotInCommittee {
@@ -42,6 +47,11 @@ func (consensus *Consensus) validatorSanityChecks(msg *msg_pb.Message) bool {
 }
 
 func (consensus *Consensus) leaderSanityChecks(msg *msg_pb.Message) bool {
+	consensus.getLogger().Debug().
+		Uint64("blockNum", msg.GetConsensus().BlockNum).
+		Uint64("viewID", msg.GetConsensus().ViewId).
+		Str("msgType", msg.Type.String()).
+		Msg("[leaderSanityChecks] Checking new message")
 	senderKey, err := consensus.verifySenderKey(msg)
 	if err != nil {
 		if err == shard.ErrValidNotInCommittee {
@@ -164,7 +174,7 @@ func (consensus *Consensus) onPreparedSanityChecks(
 			Msg("[OnPrepared] BlockHash not match")
 		return false
 	}
-	if consensus.current.Mode() == Normal || consensus.current.Mode() == Syncing {
+	if consensus.current.Mode() == Normal {
 		err := chain.Engine.VerifyHeader(consensus.ChainReader, blockObj.Header(), true)
 		if err != nil {
 			consensus.getLogger().Error().
@@ -186,6 +196,8 @@ func (consensus *Consensus) onPreparedSanityChecks(
 }
 
 func (consensus *Consensus) viewChangeSanityCheck(msg *msg_pb.Message) bool {
+	consensus.getLogger().Debug().
+		Msg("[viewChangeSanityCheck] Checking new message")
 	senderKey, err := consensus.verifyViewChangeSenderKey(msg)
 	if err != nil {
 		consensus.getLogger().Error().Err(err).Msgf(
@@ -230,8 +242,8 @@ func (consensus *Consensus) onViewChangeSanityCheck(recvMsg *FBFTMessage) bool {
 	if recvMsg.ViewID-consensus.current.ViewID() > MaxViewIDDiff {
 		consensus.getLogger().Debug().
 			Uint64("MsgViewID", recvMsg.ViewID).
-			Uint64("MaxViewIDDiff", MaxViewIDDiff).
-			Msg("Received viewID that is MaxViewIDDiff further from the current viewID!")
+			Uint64("CurrentViewID", consensus.current.ViewID()).
+			Msg("Received viewID that is MaxViewIDDiff (100) further from the current viewID!")
 		return false
 	}
 	return true

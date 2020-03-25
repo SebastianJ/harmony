@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"math/big"
 
-	"github.com/harmony-one/harmony/internal/utils"
-
-	"github.com/pkg/errors"
-
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/harmony-one/harmony/common/denominations"
 	"github.com/harmony-one/harmony/core/vm"
 	common2 "github.com/harmony-one/harmony/internal/common"
+	"github.com/harmony-one/harmony/internal/utils"
+	"github.com/harmony-one/harmony/shard"
 	staking "github.com/harmony-one/harmony/staking/types"
+	"github.com/pkg/errors"
 )
 
 var (
@@ -31,6 +31,7 @@ var (
 func VerifyAndCreateValidatorFromMsg(
 	stateDB vm.StateDB, epoch *big.Int, blockNum *big.Int, msg *staking.CreateValidator,
 ) (*staking.ValidatorWrapper, error) {
+
 	if stateDB == nil {
 		return nil, errStateDBIsMissing
 	}
@@ -63,7 +64,9 @@ func VerifyAndCreateValidatorFromMsg(
 	zero := big.NewInt(0)
 	wrapper.Counters.NumBlocksSigned = zero
 	wrapper.Counters.NumBlocksToSign = zero
-	if err := wrapper.SanityCheck(staking.DoNotEnforceMaxBLS); err != nil {
+	wrapper.BlockReward = big.NewInt(0)
+	maxBLSKeyAllowed := shard.ExternalSlotsAvailableForEpoch(epoch) / 3
+	if err := wrapper.SanityCheck(maxBLSKeyAllowed); err != nil {
 		return nil, err
 	}
 	return wrapper, nil
@@ -75,8 +78,9 @@ func VerifyAndCreateValidatorFromMsg(
 // Note that this function never updates the stateDB, it only reads from stateDB.
 func VerifyAndEditValidatorFromMsg(
 	stateDB vm.StateDB, chainContext ChainContext,
-	blockNum *big.Int, msg *staking.EditValidator,
+	epoch, blockNum *big.Int, msg *staking.EditValidator,
 ) (*staking.ValidatorWrapper, error) {
+
 	if stateDB == nil {
 		return nil, errStateDBIsMissing
 	}
@@ -107,7 +111,8 @@ func VerifyAndEditValidatorFromMsg(
 	}
 	rateAtBeginningOfEpoch := snapshotValidator.Validator.Rate
 
-	if rateAtBeginningOfEpoch.IsNil() || (!newRate.IsNil() && !rateAtBeginningOfEpoch.Equal(newRate)) {
+	if rateAtBeginningOfEpoch.IsNil() ||
+		(!newRate.IsNil() && !rateAtBeginningOfEpoch.Equal(newRate)) {
 		wrapper.Validator.UpdateHeight = blockNum
 	}
 
@@ -116,12 +121,20 @@ func VerifyAndEditValidatorFromMsg(
 	) {
 		return nil, errCommissionRateChangeTooFast
 	}
-
-	if err := wrapper.SanityCheck(staking.DoNotEnforceMaxBLS); err != nil {
+	maxBLSKeyAllowed := shard.ExternalSlotsAvailableForEpoch(epoch) / 3
+	if err := wrapper.SanityCheck(maxBLSKeyAllowed); err != nil {
 		return nil, err
 	}
 	return wrapper, nil
 }
+
+const oneThousand = 1000
+
+var (
+	oneAsBigInt           = big.NewInt(denominations.One)
+	minimumDelegation     = new(big.Int).Mul(oneAsBigInt, big.NewInt(oneThousand))
+	errDelegationTooSmall = errors.New("minimum delegation amount for a delegator has to be at least 1000 ONE")
+)
 
 // VerifyAndDelegateFromMsg verifies the delegate message using the stateDB
 // and returns the balance to be deducted by the delegator as well as the
@@ -136,6 +149,9 @@ func VerifyAndDelegateFromMsg(
 	}
 	if msg.Amount.Sign() == -1 {
 		return nil, nil, errNegativeAmount
+	}
+	if msg.Amount.Cmp(minimumDelegation) < 0 {
+		return nil, nil, errDelegationTooSmall
 	}
 	if !stateDB.IsValidator(msg.ValidatorAddress) {
 		return nil, nil, errValidatorNotExist

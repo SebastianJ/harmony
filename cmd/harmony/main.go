@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/harmony-one/harmony/numeric"
+
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/harmony-one/bls/ffi/go/bls"
@@ -108,6 +110,7 @@ var (
 	blsFolder          = flag.String("blsfolder", ".hmy/blskeys", "The folder that stores the bls keys and corresponding passphrases; e.g. <blskey>.key and <blskey>.pass; all bls keys mapped to same shard")
 	blsPass            = flag.String("blspass", "", "The file containing passphrase to decrypt the encrypted bls file.")
 	blsPassphrase      string
+	maxBlsKeysPerNode  = flag.Int("max_bls_keys_per_node", 4, "maximum number of bls keys allowed per node (default 4)")
 	// Sharding configuration parameters for devnet
 	devnetNumShards   = flag.Uint("dn_num_shards", 2, "number of shards for -network_type=devnet (default: 2)")
 	devnetShardSize   = flag.Int("dn_shard_size", 10, "number of nodes per shard for -network_type=devnet (default 10)")
@@ -305,17 +308,20 @@ func readMultiBlsKeys(consensusMultiBlsPriKey *multibls.PrivateKey, consensusMul
 		)
 		os.Exit(100)
 	}
+	if len(blsKeyFiles) > *maxBlsKeysPerNode {
+		fmt.Fprintf(os.Stderr,
+			"[Multi-BLS] maximum number of bls keys per node is %d, found: %d\n",
+			*maxBlsKeysPerNode,
+			len(blsKeyFiles),
+		)
+		os.Exit(100)
+	}
 	for _, blsKeyFile := range blsKeyFiles {
 		fullName := blsKeyFile.Name()
 		ext := filepath.Ext(fullName)
 		name := fullName[:len(fullName)-len(ext)]
 		if val, ok := keyPasses[name]; ok {
 			blsPassphrase = val
-		} else {
-			fmt.Printf("[Multi-BLS] could not find passphrase for bls key file: %s, using passphrase from %s\n",
-				fullName,
-				*blsPass,
-			)
 		}
 		blsKeyFilePath := path.Join(*blsFolder, blsKeyFile.Name())
 		consensusPriKey, err := blsgen.LoadBlsKeyWithPassPhrase(blsKeyFilePath, blsPassphrase)
@@ -379,6 +385,7 @@ func createGlobalConfig() (*nodeconfig.ConfigType, error) {
 	nodeConfig.SetPushgatewayIP(*pushgatewayIP)
 	nodeConfig.SetPushgatewayPort(*pushgatewayPort)
 	nodeConfig.SetMetricsFlag(*metricsFlag)
+	nodeConfig.SetArchival(*isArchival)
 
 	// P2p private key is used for secure message transfer between p2p nodes.
 	nodeConfig.P2pPriKey, _, err = utils.LoadKeyFromFile(*keyFile)
@@ -417,7 +424,7 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 	// Consensus object.
 	// TODO: consensus object shouldn't start here
 	// TODO(minhdoan): During refactoring, found out that the peers list is actually empty. Need to clean up the logic of consensus later.
-	decider := quorum.NewDecider(quorum.SuperMajorityVote)
+	decider := quorum.NewDecider(quorum.SuperMajorityVote, uint32(*shardID))
 
 	currentConsensus, err := consensus.New(
 		myHost, nodeConfig.ShardID, p2p.Peer{}, nodeConfig.ConsensusPriKey, decider,
@@ -456,7 +463,7 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 	// Current node.
 	chainDBFactory := &shardchain.LDBFactory{RootDir: nodeConfig.DBDir}
 
-	currentNode := node.New(myHost, currentConsensus, chainDBFactory, blacklist, true)
+	currentNode := node.New(myHost, currentConsensus, chainDBFactory, blacklist, *isArchival)
 
 	switch {
 	case *networkType == nodeconfig.Localnet:
@@ -620,7 +627,7 @@ func main() {
 		}
 		// TODO (leo): use a passing list of accounts here
 		devnetConfig, err := shardingconfig.NewInstance(
-			uint32(*devnetNumShards), *devnetShardSize, *devnetHarmonySize, genesis.HarmonyAccounts, genesis.FoundationalNodeAccounts, nil, shardingconfig.VLBPE)
+			uint32(*devnetNumShards), *devnetShardSize, *devnetHarmonySize, numeric.OneDec(), genesis.HarmonyAccounts, genesis.FoundationalNodeAccounts, nil, shardingconfig.VLBPE)
 		if err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "ERROR invalid devnet sharding config: %s",
 				err)

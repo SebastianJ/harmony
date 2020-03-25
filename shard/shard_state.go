@@ -7,14 +7,17 @@ import (
 	"errors"
 	"math/big"
 	"sort"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/harmony-one/bls/ffi/go/bls"
+	"github.com/harmony-one/harmony/crypto/hash"
 	common2 "github.com/harmony-one/harmony/internal/common"
 	"github.com/harmony-one/harmony/internal/ctxerror"
 	"github.com/harmony-one/harmony/numeric"
 	"golang.org/x/crypto/sha3"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -298,13 +301,12 @@ func (pk BlsPublicKey) Hex() string {
 	return hex.EncodeToString(pk[:])
 }
 
-// MarshalJSON ..
-func (pk BlsPublicKey) MarshalJSON() ([]byte, error) {
-	buf := bytes.Buffer{}
-	buf.WriteString(`"`)
-	buf.WriteString(pk.Hex())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
+// MarshalText so that we can use this as JSON printable when used as
+// key in a map
+func (pk BlsPublicKey) MarshalText() (text []byte, err error) {
+	text = make([]byte, BLSSignatureSizeInBytes)
+	hex.Encode(text, pk[:])
+	return text, nil
 }
 
 // FromLibBLSPublicKeyUnsafe could give back nil, use only in cases when
@@ -383,36 +385,67 @@ func (c *Committee) DeepCopy() Committee {
 	return r
 }
 
+// Hash ..
+func (c *Committee) Hash() common.Hash {
+	return hash.FromRLPNew256(c)
+}
+
+var (
+	blsKeyCache singleflight.Group
+)
+
+func lookupBLSPublicKeys(
+	c *Committee,
+) ([]*bls.PublicKey, error) {
+	key := c.Hash().Hex()
+	results, err, _ := blsKeyCache.Do(
+		key, func() (interface{}, error) {
+			slice := make([]*bls.PublicKey, len(c.Slots))
+			for j := range c.Slots {
+				committerKey := &bls.PublicKey{}
+				if err := c.Slots[j].BlsPublicKey.ToLibBLSPublicKey(
+					committerKey,
+				); err != nil {
+					return nil, err
+				}
+				slice[j] = committerKey
+			}
+			// Only made once
+			go func() {
+				time.Sleep(25 * time.Minute)
+				blsKeyCache.Forget(key)
+			}()
+			return slice, nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return results.([]*bls.PublicKey), nil
+}
+
 // BLSPublicKeys ..
 func (c *Committee) BLSPublicKeys() ([]*bls.PublicKey, error) {
 	if c == nil {
-		return nil, ErrCommitteeNil
+		return nil, ErrSubCommitteeNil
 	}
-
-	slice := make([]*bls.PublicKey, len(c.Slots))
-	for j := range c.Slots {
-		committerKey := &bls.PublicKey{}
-		if err := c.Slots[j].BlsPublicKey.ToLibBLSPublicKey(
-			committerKey,
-		); err != nil {
-			return nil, err
-		}
-		slice[j] = committerKey
-	}
-	return slice, nil
+	return lookupBLSPublicKeys(c)
 }
 
 var (
 	// ErrValidNotInCommittee ..
 	ErrValidNotInCommittee = errors.New("slot signer not this slot's subcommittee")
-	// ErrCommitteeNil ..
-	ErrCommitteeNil = errors.New("subcommittee is nil pointer")
+	// ErrSubCommitteeNil ..
+	ErrSubCommitteeNil = errors.New("subcommittee is nil pointer")
+	// ErrSuperCommitteeNil ..
+	ErrSuperCommitteeNil = errors.New("supercommittee is nil pointer")
 )
 
 // AddressForBLSKey ..
 func (c *Committee) AddressForBLSKey(key BlsPublicKey) (*common.Address, error) {
 	if c == nil {
-		return nil, ErrCommitteeNil
+		return nil, ErrSubCommitteeNil
 	}
 
 	for _, slot := range c.Slots {
