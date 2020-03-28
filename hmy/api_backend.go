@@ -22,6 +22,7 @@ import (
 	"github.com/harmony-one/harmony/core/vm"
 	internal_common "github.com/harmony-one/harmony/internal/common"
 	"github.com/harmony-one/harmony/internal/params"
+	"github.com/harmony-one/harmony/numeric"
 	"github.com/harmony-one/harmony/shard"
 	"github.com/harmony-one/harmony/shard/committee"
 	"github.com/harmony-one/harmony/staking/availability"
@@ -325,17 +326,22 @@ func (b *APIBackend) GetAllValidatorAddresses() []common.Address {
 	return b.hmy.BlockChain().ValidatorCandidates()
 }
 
+var (
+	zero = numeric.ZeroDec()
+)
+
 // GetValidatorInformation returns the information of validator
 func (b *APIBackend) GetValidatorInformation(
-	addr common.Address,
+	addr common.Address, block *types.Block,
 ) (*staking.ValidatorRPCEnchanced, error) {
-	wrapper, err := b.hmy.BlockChain().ReadValidatorInformation(addr)
+	bc := b.hmy.BlockChain()
+	wrapper, err := bc.ReadValidatorInformationAt(addr, block.Root())
 	if err != nil {
 		s, _ := internal_common.AddressToBech32(addr)
 		return nil, errors.Wrapf(err, "not found address in current state %s", s)
 	}
 
-	now := b.hmy.BlockChain().CurrentHeader().Epoch()
+	now := block.Epoch()
 	inCommittee := now.Cmp(wrapper.LastEpochInCommittee) == 0
 	defaultReply := &staking.ValidatorRPCEnchanced{
 		CurrentlyInCommittee: inCommittee,
@@ -346,9 +352,14 @@ func (b *APIBackend) GetValidatorInformation(
 		EPoSStatus: effective.ValidatorStatus(
 			inCommittee, wrapper.Status == effective.Active,
 		).String(),
+		Lifetime: &staking.AccumulatedOverLifetime{
+			wrapper.BlockReward,
+			wrapper.Counters,
+			zero,
+		},
 	}
 
-	snapshot, err := b.hmy.BlockChain().ReadValidatorSnapshotAtEpoch(
+	snapshot, err := bc.ReadValidatorSnapshotAtEpoch(
 		now, addr,
 	)
 
@@ -361,10 +372,12 @@ func (b *APIBackend) GetValidatorInformation(
 	)
 	computed.BlocksLeftInEpoch = shard.Schedule.BlocksPerEpoch() - computed.ToSign.Uint64()
 
-	stats, err := b.hmy.BlockChain().ReadValidatorStats(addr)
+	stats, err := bc.ReadValidatorStats(addr)
 	if err != nil {
 		return defaultReply, nil
 	}
+
+	defaultReply.Lifetime.APR = stats.APR
 
 	if defaultReply.CurrentlyInCommittee {
 		defaultReply.Performance = &staking.CurrentEpochPerformance{
@@ -401,7 +414,7 @@ func (b *APIBackend) GetTotalStakingSnapshot() *big.Int {
 	for i := range candidates {
 		snapshot, _ := b.hmy.BlockChain().ReadValidatorSnapshot(candidates[i])
 		validator, _ := b.hmy.BlockChain().ReadValidatorInformation(candidates[i])
-		if !committee.IsEligibleForEPoSAuction(snapshot, validator) {
+		if !committee.IsEligibleForEPoSAuction(snapshot, validator, b.hmy.BlockChain().CurrentBlock().Epoch()) {
 			continue
 		}
 		for i := range validator.Delegations {

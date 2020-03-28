@@ -84,6 +84,8 @@ func AccumulateRewards(
 	header *block.Header, beaconChain engine.ChainReader,
 ) (reward.Reader, error) {
 	blockNum := header.Number().Uint64()
+	currentHeader := beaconChain.CurrentHeader()
+	nowEpoch, blockNow := currentHeader.Epoch(), currentHeader.Number()
 
 	if blockNum == 0 {
 		// genesis block has no parent to reward.
@@ -98,24 +100,27 @@ func AccumulateRewards(
 	// After staking
 	if bc.Config().IsStaking(header.Epoch()) &&
 		bc.CurrentHeader().ShardID() == shard.BeaconChainShardID {
-		utils.AnalysisStart("accumulateRewardBeaconchainSelfPayout")
+		utils.AnalysisStart("accumulateRewardBeaconchainSelfPayout", nowEpoch, blockNow)
 		defaultReward := network.BaseStakedReward
-		beaconCurrentEpoch := beaconChain.CurrentHeader().Epoch()
-		// TODO Use cached result in off-chain db instead of full computation
-		_, percentageStaked, err := network.WhatPercentStakedNow(
-			beaconChain, header.Time().Int64(),
-		)
-		if err != nil {
-			return network.EmptyPayout, err
-		}
-		howMuchOff, adjustBy := network.Adjustment(*percentageStaked)
-		defaultReward = defaultReward.Add(adjustBy)
-		utils.Logger().Info().
-			Str("percentage-token-staked", percentageStaked.String()).
-			Str("how-much-off", howMuchOff.String()).
-			Str("adjusting-by", adjustBy.String()).
-			Str("block-reward", defaultReward.String()).
-			Msg("dynamic adjustment of block-reward ")
+
+		// Following is commented because the new econ-model has a flat-rate block reward
+		// of 28 ONE per block assuming 4 shards and 8s block time:
+		//// TODO Use cached result in off-chain db instead of full computation
+		//_, percentageStaked, err := network.WhatPercentStakedNow(
+		//	beaconChain, header.Time().Int64(),
+		//)
+		//if err != nil {
+		//	return network.EmptyPayout, err
+		//}
+		//howMuchOff, adjustBy := network.Adjustment(*percentageStaked)
+		//defaultReward = defaultReward.Add(adjustBy)
+		//utils.Logger().Info().
+		//	Str("percentage-token-staked", percentageStaked.String()).
+		//	Str("how-much-off", howMuchOff.String()).
+		//	Str("adjusting-by", adjustBy.String()).
+		//	Str("block-reward", defaultReward.String()).
+		//	Msg("dynamic adjustment of block-reward ")
+
 		// If too much is staked, then possible to have negative reward,
 		// not an error, just a possible economic situation, hence we return
 		if defaultReward.IsNegative() {
@@ -140,6 +145,7 @@ func AccumulateRewards(
 		); err != nil {
 			return network.EmptyPayout, err
 		}
+		beaconCurrentEpoch := beaconChain.CurrentHeader().Epoch()
 		votingPower, err := lookupVotingPower(
 			header.Epoch(), beaconCurrentEpoch, &subComm,
 		)
@@ -166,9 +172,9 @@ func AccumulateRewards(
 				}
 			}
 		}
-		utils.AnalysisEnd("accumulateRewardBeaconchainSelfPayout")
+		utils.AnalysisEnd("accumulateRewardBeaconchainSelfPayout", nowEpoch, blockNow)
 
-		utils.AnalysisStart("accumulateRewardShardchainPayout")
+		utils.AnalysisStart("accumulateRewardShardchainPayout", nowEpoch, blockNow)
 		// Handle rewards for shardchain
 		if cxLinks := header.CrossLinks(); len(cxLinks) > 0 {
 			crossLinks := types.CrossLinks{}
@@ -291,7 +297,7 @@ func AccumulateRewards(
 					}
 				}
 			}
-			utils.AnalysisEnd("accumulateRewardShardchainPayout")
+			utils.AnalysisEnd("accumulateRewardShardchainPayout", nowEpoch, blockNow)
 			return network.NewStakingEraRewardForRound(newRewards, missing), nil
 		}
 		return network.EmptyPayout, nil
