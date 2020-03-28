@@ -6,6 +6,8 @@ import (
 	"math/big"
 	"sort"
 
+	"github.com/harmony-one/harmony/internal/utils"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/harmony-one/bls/ffi/go/bls"
 	common2 "github.com/harmony-one/harmony/internal/common"
@@ -204,7 +206,12 @@ func Compute(subComm *shard.Committee, epoch *big.Int) (*Roster, error) {
 			ourPercentage = ourPercentage.Add(member.OverallPercent)
 		}
 
-		roster.Voters[staked[i].BlsPublicKey] = &member
+		// TODO: make sure external user's BLS key can be same as harmony's bls keys
+		if _, ok := roster.Voters[staked[i].BlsPublicKey]; !ok {
+			roster.Voters[staked[i].BlsPublicKey] = &member
+		} else {
+			utils.Logger().Debug().Str("blsKey", staked[i].BlsPublicKey.Hex()).Msg("Duplicate BLS key found")
+		}
 	}
 
 	// NOTE Enforce voting power sums to one,

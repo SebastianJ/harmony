@@ -26,6 +26,7 @@ const (
 	MaxSecurityContactLength = 140
 	MaxDetailsLength         = 280
 	BlsVerificationStr       = "harmony-one"
+	TenThousand              = 10000
 )
 
 var (
@@ -37,7 +38,7 @@ var (
 		"total delegation can not be bigger than max_total_delegation",
 	)
 	errMinSelfDelegationTooSmall = errors.New(
-		"min_self_delegation has to be greater than 1 ONE",
+		"min_self_delegation has to be greater than 10,000 ONE",
 	)
 	errInvalidMaxTotalDelegation = errors.New(
 		"max_total_delegation can not be less than min_self_delegation",
@@ -84,9 +85,9 @@ type ValidatorWrapper struct {
 	Validator
 	Delegations Delegations
 	//
-	Counters counters
+	Counters counters `json:"-"`
 	// All the rewarded accumulated so far
-	BlockReward *big.Int
+	BlockReward *big.Int `json:"-"`
 }
 
 // Computed represents current epoch
@@ -136,11 +137,14 @@ type ValidatorRPCEnchanced struct {
 	TotalDelegated       *big.Int                 `json:"total-delegation"`
 	CurrentlyInCommittee bool                     `json:"currently-in-committee"`
 	EPoSStatus           string                   `json:"epos-status"`
+	Lifetime             *AccumulatedOverLifetime `json:"lifetime"`
 }
 
-type accumulatedOverLifetime struct {
-	BlockReward *big.Int `json:"reward-accumulated"`
-	Signing     counters `json:"blocks"`
+// AccumulatedOverLifetime ..
+type AccumulatedOverLifetime struct {
+	BlockReward *big.Int    `json:"reward-accumulated"`
+	Signing     counters    `json:"blocks"`
+	APR         numeric.Dec `json:"apr"`
 }
 
 func (w ValidatorWrapper) String() string {
@@ -152,21 +156,19 @@ func (w ValidatorWrapper) String() string {
 func (w ValidatorWrapper) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Validator
-		Address     string                  `json:"address"`
-		Delegations Delegations             `json:"delegations"`
-		Lifetime    accumulatedOverLifetime `json:"lifetime"`
+		Address     string      `json:"address"`
+		Delegations Delegations `json:"delegations"`
 	}{
 		w.Validator,
 		common2.MustAddressToBech32(w.Address),
 		w.Delegations,
-		accumulatedOverLifetime{w.BlockReward, w.Counters},
 	})
 }
 
 // ValidatorStats to record validator's performance and history records
 type ValidatorStats struct {
 	// APR ..
-	APR numeric.Dec `json:"current-apr"`
+	APR numeric.Dec `json:"-"`
 	// TotalEffectiveStake is the total effective stake this validator has
 	TotalEffectiveStake numeric.Dec `json:"total-effective-stake"`
 	// MetricsPerShard ..
@@ -205,6 +207,11 @@ type Validator struct {
 // DoNotEnforceMaxBLS ..
 const DoNotEnforceMaxBLS = -1
 
+var (
+	oneAsBigInt  = big.NewInt(denominations.One)
+	minimumStake = new(big.Int).Mul(oneAsBigInt, big.NewInt(TenThousand))
+)
+
 // SanityCheck checks basic requirements of a validator
 func (v *Validator) SanityCheck(oneThirdExtrn int) error {
 	if _, err := v.EnsureLength(); err != nil {
@@ -232,7 +239,7 @@ func (v *Validator) SanityCheck(oneThirdExtrn int) error {
 	}
 
 	// MinSelfDelegation must be >= 1 ONE
-	if v.MinSelfDelegation.Cmp(big.NewInt(denominations.One)) < 0 {
+	if v.MinSelfDelegation.Cmp(minimumStake) < 0 {
 		return errors.Wrapf(
 			errMinSelfDelegationTooSmall,
 			"delegation-given %s", v.MinSelfDelegation.String(),

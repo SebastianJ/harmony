@@ -69,15 +69,17 @@ func (consensus *Consensus) prepare() {
 		}
 
 		// TODO: this will not return immediatey, may block
-		if err := consensus.msgSender.SendWithoutRetry(
-			groupID,
-			host.ConstructP2pMessage(byte(17), networkMessage.Bytes),
-		); err != nil {
-			consensus.getLogger().Warn().Err(err).Msg("[OnAnnounce] Cannot send prepare message")
-		} else {
-			consensus.getLogger().Info().
-				Str("blockHash", hex.EncodeToString(consensus.blockHash[:])).
-				Msg("[OnAnnounce] Sent Prepare Message!!")
+		if consensus.current.Mode() != Listening {
+			if err := consensus.msgSender.SendWithoutRetry(
+				groupID,
+				host.ConstructP2pMessage(byte(17), networkMessage.Bytes),
+			); err != nil {
+				consensus.getLogger().Warn().Err(err).Msg("[OnAnnounce] Cannot send prepare message")
+			} else {
+				consensus.getLogger().Info().
+					Str("blockHash", hex.EncodeToString(consensus.blockHash[:])).
+					Msg("[OnAnnounce] Sent Prepare Message!!")
+			}
 		}
 	}
 	consensus.getLogger().Debug().
@@ -182,6 +184,12 @@ func (consensus *Consensus) onPrepared(msg *msg_pb.Message) {
 		return
 	}
 
+	// TODO: genesis account node delay for 1 second,
+	// this is a temp fix for allows FN nodes to earning reward
+	if consensus.delayCommit > 0 {
+		time.Sleep(consensus.delayCommit)
+	}
+
 	// add preparedSig field
 	consensus.aggregatedPrepareSig = aggSig
 	consensus.prepareBitmap = mask
@@ -201,22 +209,19 @@ func (consensus *Consensus) onPrepared(msg *msg_pb.Message) {
 			append(blockNumBytes, consensus.blockHash[:]...),
 			key, consensus.priKey.PrivateKey[i],
 		)
-		// TODO: genesis account node delay for 1 second,
-		// this is a temp fix for allows FN nodes to earning reward
-		if consensus.delayCommit > 0 {
-			time.Sleep(consensus.delayCommit)
-		}
 
-		if err := consensus.msgSender.SendWithoutRetry(
-			groupID,
-			host.ConstructP2pMessage(byte(17), networkMessage.Bytes),
-		); err != nil {
-			consensus.getLogger().Warn().Msg("[OnPrepared] Cannot send commit message!!")
-		} else {
-			consensus.getLogger().Info().
-				Uint64("blockNum", consensus.blockNum).
-				Hex("blockHash", consensus.blockHash[:]).
-				Msg("[OnPrepared] Sent Commit Message!!")
+		if consensus.current.Mode() != Listening {
+			if err := consensus.msgSender.SendWithoutRetry(
+				groupID,
+				host.ConstructP2pMessage(byte(17), networkMessage.Bytes),
+			); err != nil {
+				consensus.getLogger().Warn().Msg("[OnPrepared] Cannot send commit message!!")
+			} else {
+				consensus.getLogger().Info().
+					Uint64("blockNum", consensus.blockNum).
+					Hex("blockHash", consensus.blockHash[:]).
+					Msg("[OnPrepared] Sent Commit Message!!")
+			}
 		}
 	}
 	consensus.getLogger().Debug().
@@ -277,7 +282,7 @@ func (consensus *Consensus) onCommitted(msg *msg_pb.Message) {
 		consensus.getLogger().Debug().Uint64("MsgBlockNum", recvMsg.BlockNum).Msg("[OnCommitted] out of sync")
 		go func() {
 			select {
-			case consensus.blockNumLowChan <- struct{}{}:
+			case consensus.BlockNumLowChan <- struct{}{}:
 				consensus.current.SetMode(Syncing)
 				for _, v := range consensus.consensusTimeout {
 					v.Stop()
