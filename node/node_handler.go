@@ -92,6 +92,13 @@ func (node *Node) processSkippedMsgTypeByteValue(cat proto_node.BlockMessageType
 
 // HandleMessage parses the message and dispatch the actions.
 func (node *Node) HandleMessage(content []byte, sender libp2p_peer.ID) {
+	if len(content) >= types.MaxEncodedPoolTransactionSize {
+		utils.Logger().Error().
+			Err(core.ErrOversizedData).
+			Msgf("encoded tx size: %d", len(content))
+		return
+	}
+
 	msgCategory, err := proto.GetMessageCategory(content)
 	if err != nil {
 		utils.Logger().Error().
