@@ -12,6 +12,7 @@ import (
 	"github.com/harmony-one/harmony/crypto/hash"
 	common2 "github.com/harmony-one/harmony/internal/common"
 	"github.com/harmony-one/harmony/internal/ctxerror"
+	"github.com/harmony-one/harmony/internal/genesis"
 	"github.com/harmony-one/harmony/numeric"
 	"github.com/harmony-one/harmony/shard"
 	"github.com/harmony-one/harmony/staking/effective"
@@ -30,8 +31,9 @@ const (
 )
 
 var (
-	errAddressNotMatch       = errors.New("Validator key not match")
-	errInvalidSelfDelegation = errors.New(
+	errAddressNotMatch = errors.New("validator key not match")
+	// ErrInvalidSelfDelegation ..
+	ErrInvalidSelfDelegation = errors.New(
 		"self delegation can not be less than min_self_delegation",
 	)
 	errInvalidTotalDelegation = errors.New(
@@ -324,16 +326,18 @@ func (w *ValidatorWrapper) SanityCheck(
 	switch len(w.Delegations) {
 	case 0:
 		return errors.Wrapf(
-			errInvalidSelfDelegation, "no self delegation given at all",
+			ErrInvalidSelfDelegation, "no self delegation given at all",
 		)
 	default:
 		if w.Status != effective.Banned &&
 			w.Delegations[0].Amount.Cmp(w.Validator.MinSelfDelegation) < 0 {
-			return errors.Wrapf(
-				errInvalidSelfDelegation,
-				"min_self_delegation %s, amount %s",
-				w.Validator.MinSelfDelegation, w.Delegations[0].Amount.String(),
-			)
+			if w.Status == effective.Active {
+				return errors.Wrapf(
+					ErrInvalidSelfDelegation,
+					"min_self_delegation %s, amount %s",
+					w.Validator.MinSelfDelegation, w.Delegations[0].Amount.String(),
+				)
+			}
 		}
 	}
 	totalDelegation := w.TotalDelegation()
@@ -470,14 +474,68 @@ func VerifyBLSKey(pubKey *shard.BlsPublicKey, pubKeySig *shard.BLSSignature) err
 	return nil
 }
 
+func containsHarmonyBLSKeys(
+	blsKeys []shard.BlsPublicKey,
+	hmyAccounts []genesis.DeployAccount,
+	epoch *big.Int,
+) error {
+	for i := range blsKeys {
+		if err := matchesHarmonyBLSKey(
+			&blsKeys[i], hmyAccounts, epoch,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func matchesHarmonyBLSKey(
+	blsKey *shard.BlsPublicKey,
+	hmyAccounts []genesis.DeployAccount,
+	epoch *big.Int,
+) error {
+	type publicKeyAsHex = string
+	cache := map[string]map[publicKeyAsHex]struct{}{}
+	return func() error {
+		key := epoch.String()
+		if _, ok := cache[key]; !ok {
+			// one time cost per epoch
+			cache[key] = map[publicKeyAsHex]struct{}{}
+			for i := range hmyAccounts {
+				// invariant assume it is hex
+				cache[key][hmyAccounts[i].BlsPublicKey] = struct{}{}
+			}
+		}
+
+		hex := blsKey.Hex()
+		if _, exists := cache[key][hex]; exists {
+			return errors.Wrapf(
+				errDuplicateSlotKeys,
+				"slot key %s conflicts with internal keys",
+				hex,
+			)
+		}
+		return nil
+	}()
+}
+
 // CreateValidatorFromNewMsg creates validator from NewValidator message
-func CreateValidatorFromNewMsg(val *CreateValidator, blockNum *big.Int) (*Validator, error) {
+func CreateValidatorFromNewMsg(
+	val *CreateValidator, blockNum, epoch *big.Int,
+) (*Validator, error) {
 	desc, err := val.Description.EnsureLength()
 	if err != nil {
 		return nil, err
 	}
 	commission := Commission{val.CommissionRates, blockNum}
 	pubKeys := append(val.SlotPubKeys[0:0], val.SlotPubKeys...)
+
+	instance := shard.Schedule.InstanceForEpoch(epoch)
+	if err := containsHarmonyBLSKeys(
+		pubKeys, instance.HmyAccounts(), epoch,
+	); err != nil {
+		return nil, err
+	}
 
 	if err = VerifyBLSKeys(pubKeys, val.SlotKeySigs); err != nil {
 		return nil, err
@@ -498,7 +556,7 @@ func CreateValidatorFromNewMsg(val *CreateValidator, blockNum *big.Int) (*Valida
 }
 
 // UpdateValidatorFromEditMsg updates validator from EditValidator message
-func UpdateValidatorFromEditMsg(validator *Validator, edit *EditValidator) error {
+func UpdateValidatorFromEditMsg(validator *Validator, edit *EditValidator, epoch *big.Int) error {
 	if validator.Address != edit.ValidatorAddress {
 		return errAddressNotMatch
 	}
@@ -548,6 +606,12 @@ func UpdateValidatorFromEditMsg(validator *Validator, edit *EditValidator) error
 			}
 		}
 		if !found {
+			instance := shard.Schedule.InstanceForEpoch(epoch)
+			if err := matchesHarmonyBLSKey(
+				edit.SlotKeyToAdd, instance.HmyAccounts(), epoch,
+			); err != nil {
+				return err
+			}
 			if err := VerifyBLSKey(edit.SlotKeyToAdd, edit.SlotKeyToAddSig); err != nil {
 				return err
 			}

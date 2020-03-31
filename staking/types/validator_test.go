@@ -282,7 +282,7 @@ func TestValidatorWrapperSanityCheck(t *testing.T) {
 	// no delegation must fail
 	wrapper := createNewValidatorWrapper(createNewValidator())
 	if err := wrapper.SanityCheck(DoNotEnforceMaxBLS); err == nil {
-		t.Error("expected", errInvalidSelfDelegation, "got", err)
+		t.Error("expected", ErrInvalidSelfDelegation, "got", err)
 	}
 
 	// valid self delegation must not fail
@@ -297,13 +297,13 @@ func TestValidatorWrapperSanityCheck(t *testing.T) {
 	valDel = NewDelegation(validatorAddr, big.NewInt(1e18))
 	wrapper.Delegations = []Delegation{valDel}
 	if err := wrapper.SanityCheck(DoNotEnforceMaxBLS); err == nil {
-		t.Error("expected", errInvalidSelfDelegation, "got", err)
+		t.Error("expected", ErrInvalidSelfDelegation, "got", err)
 	}
 
 	// invalid self delegation of less than 10K ONE must fail
 	valDel = NewDelegation(validatorAddr, big.NewInt(1e18))
 	if err := wrapper.SanityCheck(DoNotEnforceMaxBLS); err == nil {
-		t.Error("expected", errInvalidSelfDelegation, "got", err)
+		t.Error("expected", ErrInvalidSelfDelegation, "got", err)
 	}
 }
 
@@ -400,7 +400,7 @@ func TestCreateValidatorFromNewMsg(t *testing.T) {
 		Amount:           big.NewInt(1e18),
 	}
 	blockNum := big.NewInt(1000)
-	_, err := CreateValidatorFromNewMsg(&v, blockNum)
+	_, err := CreateValidatorFromNewMsg(&v, blockNum, new(big.Int))
 	if err != nil {
 		t.Errorf("CreateValidatorFromNewMsg failed")
 	}
@@ -413,7 +413,7 @@ func TestUpdateValidatorFromEditMsg(t *testing.T) {
 		MinSelfDelegation:  tenK,
 		MaxTotalDelegation: twelveK,
 	}
-	UpdateValidatorFromEditMsg(&validator, &ev)
+	UpdateValidatorFromEditMsg(&validator, &ev, new(big.Int))
 
 	if validator.MinSelfDelegation.Cmp(tenK) != 0 {
 		t.Errorf("UpdateValidatorFromEditMsg failed")
