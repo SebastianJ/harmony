@@ -897,17 +897,17 @@ func (pool *TxPool) add(tx types.PoolTransaction, local bool) (bool, error) {
 	from, _ := types.PoolTransactionSender(pool.signer, tx) // already validated
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
-		inserted, old := list.Add(tx, pool.config.PriceBump)
-		if !inserted {
+		_, old := list.Add(tx, pool.config.PriceBump)
+		/*if !inserted {
 			pendingDiscardCounter.Inc(1)
 			return false, errors.WithMessage(ErrReplaceUnderpriced, "existing transaction price was not bumped enough")
-		}
+		}*/
 		// New transaction is better, replace old one
-		if old != nil {
-			pool.all.Remove(old.Hash())
-			pool.priced.Removed()
-			pendingReplaceCounter.Inc(1)
-		}
+		//if old != nil {
+		pool.all.Remove(old.Hash())
+		pool.priced.Removed()
+		pendingReplaceCounter.Inc(1)
+		//}
 		pool.all.Add(tx)
 		pool.priced.Put(tx)
 		pool.journalTx(from, tx)
