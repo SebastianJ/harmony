@@ -903,11 +903,11 @@ func (pool *TxPool) add(tx types.PoolTransaction, local bool) (bool, error) {
 			return false, errors.WithMessage(ErrReplaceUnderpriced, "existing transaction price was not bumped enough")
 		}*/
 		// New transaction is better, replace old one
-		//if old != nil {
-		pool.all.Remove(old.Hash())
-		pool.priced.Removed()
-		pendingReplaceCounter.Inc(1)
-		//}
+		if old != nil {
+			pool.all.Remove(old.Hash())
+			pool.priced.Removed()
+			pendingReplaceCounter.Inc(1)
+		}
 		pool.all.Add(tx)
 		pool.priced.Put(tx)
 		pool.journalTx(from, tx)
