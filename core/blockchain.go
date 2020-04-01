@@ -2313,7 +2313,14 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 			total = total.Add(value[i].EffectiveStake)
 		}
 		stats.TotalEffectiveStake = total
-		stats.MetricsPerShard = value
+		earningWrapping := make([]staking.VoteWithCurrentEpochEarning, len(value))
+		for i := range value {
+			earningWrapping[i] = staking.VoteWithCurrentEpochEarning{
+				VoteOnSubcomittee: value[i],
+				Earned:            common.Big0,
+			}
+		}
+		stats.MetricsPerShard = earningWrapping
 		wrapper, err := state.ValidatorWrapper(key)
 		if err != nil {
 			return err
@@ -2725,7 +2732,7 @@ func (bc *BlockChain) GetECDSAFromCoinbase(header *block.Header) (common.Address
 			return member.EcdsaAddress, nil
 		}
 
-		if utils.GetAddressFromBlsPubKeyBytes(member.BlsPublicKey[:]) == coinbase {
+		if utils.GetAddressFromBLSPubKeyBytes(member.BLSPublicKey[:]) == coinbase {
 			return member.EcdsaAddress, nil
 		}
 	}

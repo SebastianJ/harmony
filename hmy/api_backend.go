@@ -350,7 +350,7 @@ func (b *APIBackend) GetValidatorInformation(
 		ComputedMetrics:      nil,
 		TotalDelegated:       wrapper.TotalDelegation(),
 		EPoSStatus: effective.ValidatorStatus(
-			inCommittee, wrapper.Status == effective.Active,
+			inCommittee, wrapper.Status,
 		).String(),
 		Lifetime: &staking.AccumulatedOverLifetime{
 			wrapper.BlockReward,
@@ -370,7 +370,8 @@ func (b *APIBackend) GetValidatorInformation(
 	computed := availability.ComputeCurrentSigning(
 		snapshot, wrapper,
 	)
-	computed.BlocksLeftInEpoch = shard.Schedule.BlocksPerEpoch() - computed.ToSign.Uint64()
+	beaconChainBlocks := uint64(b.hmy.BeaconChain().CurrentBlock().Header().Number().Int64()) % shard.Schedule.BlocksPerEpoch()
+	computed.BlocksLeftInEpoch = shard.Schedule.BlocksPerEpoch() - beaconChainBlocks
 
 	stats, err := bc.ReadValidatorStats(addr)
 	if err != nil {
