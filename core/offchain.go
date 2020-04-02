@@ -222,7 +222,7 @@ func (bc *BlockChain) CommitOffChainData(
 					if stats, err := bc.ReadValidatorStats(paid[i].Addr); err == nil {
 						doUpdate := false
 						for j := range stats.MetricsPerShard {
-							if stats.MetricsPerShard[j].Identity == paid[i].EarningKey {
+							if stats.MetricsPerShard[j].Vote.Identity == paid[i].EarningKey {
 								doUpdate = true
 								stats.MetricsPerShard[j].Earned.Add(
 									stats.MetricsPerShard[j].Earned,
@@ -230,15 +230,19 @@ func (bc *BlockChain) CommitOffChainData(
 								)
 							}
 						}
-						if !doUpdate {
-							if err := rawdb.WriteValidatorStats(batch, paid[i].Addr, stats); err != nil {
-								utils.Logger().Info().
-									Err(err).Msg("could not update earning per key in stats")
+						if doUpdate {
+							if err := rawdb.WriteValidatorStats(
+								batch, paid[i].Addr, stats,
+							); err != nil {
+								utils.Logger().Info().Err(err).
+									Str("bls-earning-key", paid[i].EarningKey.Hex()).
+									Msg("could not update earning per key in stats")
 							}
 						}
 					} else {
-						utils.Logger().Info().
-							Err(err).Msg("could not read validator stats to update for earning per key")
+						utils.Logger().Info().Err(err).
+							Str("bls-earning-key", paid[i].EarningKey.Hex()).
+							Msg("could not read validator stats to update for earning per key")
 					}
 				}
 			}
