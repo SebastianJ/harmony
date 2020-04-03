@@ -4,7 +4,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	protobuf "github.com/golang/protobuf/proto"
@@ -13,12 +12,10 @@ import (
 	"github.com/harmony-one/harmony/block"
 	consensus_engine "github.com/harmony-one/harmony/consensus/engine"
 	"github.com/harmony-one/harmony/consensus/quorum"
-	"github.com/harmony-one/harmony/core/types"
 	bls_cosi "github.com/harmony-one/harmony/crypto/bls"
 	"github.com/harmony-one/harmony/crypto/hash"
 	"github.com/harmony-one/harmony/internal/chain"
 	"github.com/harmony-one/harmony/internal/ctxerror"
-	"github.com/harmony-one/harmony/internal/profiler"
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/multibls"
 	"github.com/harmony-one/harmony/p2p"
@@ -251,7 +248,7 @@ func verifyMessageSig(signerPubKey *bls.PublicKey, message *msg_pb.Message) erro
 // verifySenderKey verifys the message senderKey is properly signed and senderAddr is valid
 func (consensus *Consensus) verifySenderKey(msg *msg_pb.Message) (*bls.PublicKey, error) {
 	consensusMsg := msg.GetConsensus()
-	senderKey, err := bls_cosi.BytesToBlsPublicKey(consensusMsg.SenderPubkey)
+	senderKey, err := bls_cosi.BytesToBLSPublicKey(consensusMsg.SenderPubkey)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +261,7 @@ func (consensus *Consensus) verifySenderKey(msg *msg_pb.Message) (*bls.PublicKey
 
 func (consensus *Consensus) verifyViewChangeSenderKey(msg *msg_pb.Message) (*bls.PublicKey, error) {
 	vcMsg := msg.GetViewchange()
-	senderKey, err := bls_cosi.BytesToBlsPublicKey(vcMsg.SenderPubkey)
+	senderKey, err := bls_cosi.BytesToBLSPublicKey(vcMsg.SenderPubkey)
 	if err != nil {
 		return nil, err
 	}
@@ -357,42 +354,6 @@ func (consensus *Consensus) ReadSignatureBitmapPayload(
 	)
 }
 
-func (consensus *Consensus) reportMetrics(block types.Block) {
-	endTime := time.Now()
-	timeElapsed := endTime.Sub(startTime)
-	numOfTxs := len(block.Transactions())
-	tps := float64(numOfTxs) / timeElapsed.Seconds()
-	consensus.getLogger().Info().
-		Int("numOfTXs", numOfTxs).
-		Time("startTime", startTime).
-		Time("endTime", endTime).
-		Dur("timeElapsed", endTime.Sub(startTime)).
-		Float64("TPS", tps).
-		Msg("TPS Report")
-
-	// Post metrics
-	profiler := profiler.GetProfiler()
-	if profiler.MetricsReportURL == "" {
-		return
-	}
-
-	txHashes := []string{}
-	for i, end := 0, len(block.Transactions()); i < 3 && i < end; i++ {
-		txHash := block.Transactions()[end-1-i].Hash()
-		txHashes = append(txHashes, hex.EncodeToString(txHash[:]))
-	}
-	metrics := map[string]interface{}{
-		"key":             hex.EncodeToString(consensus.LeaderPubKey.Serialize()),
-		"tps":             tps,
-		"txCount":         numOfTxs,
-		"nodeCount":       consensus.Decider.ParticipantsCount() + 1,
-		"latestBlockHash": hex.EncodeToString(consensus.blockHash[:]),
-		"latestTxHashes":  txHashes,
-		"blockLatency":    int(timeElapsed / time.Millisecond),
-	}
-	profiler.LogMetrics(metrics)
-}
-
 // getLogger returns logger for consensus contexts added
 func (consensus *Consensus) getLogger() *zerolog.Logger {
 	logger := utils.Logger().With().
@@ -428,21 +389,21 @@ func (consensus *Consensus) getLeaderPubKeyFromCoinbase(header *block.Header) (*
 	for _, member := range committee.Slots {
 		if isStaking {
 			// After staking the coinbase address will be the address of bls public key
-			if utils.GetAddressFromBlsPubKeyBytes(member.BlsPublicKey[:]) == header.Coinbase() {
-				err := member.BlsPublicKey.ToLibBLSPublicKey(committerKey)
+			if utils.GetAddressFromBLSPubKeyBytes(member.BLSPublicKey[:]) == header.Coinbase() {
+				err := member.BLSPublicKey.ToLibBLSPublicKey(committerKey)
 				if err != nil {
 					return nil, ctxerror.New("cannot convert BLS public key",
-						"blsPublicKey", member.BlsPublicKey,
+						"blsPublicKey", member.BLSPublicKey,
 						"coinbaseAddr", header.Coinbase()).WithCause(err)
 				}
 				return committerKey, nil
 			}
 		} else {
 			if member.EcdsaAddress == header.Coinbase() {
-				err := member.BlsPublicKey.ToLibBLSPublicKey(committerKey)
+				err := member.BLSPublicKey.ToLibBLSPublicKey(committerKey)
 				if err != nil {
 					return nil, ctxerror.New("cannot convert BLS public key",
-						"blsPublicKey", member.BlsPublicKey,
+						"blsPublicKey", member.BLSPublicKey,
 						"coinbaseAddr", header.Coinbase()).WithCause(err)
 				}
 				return committerKey, nil

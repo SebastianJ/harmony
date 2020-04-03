@@ -1,21 +1,33 @@
 package blsgen
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
 	ffi_bls "github.com/harmony-one/bls/ffi/go/bls"
-
 	"github.com/harmony-one/harmony/crypto/bls"
+	"github.com/pkg/errors"
 )
+
+type awsConfiguration struct {
+	AccessKey string `json:"aws-access-key-id"`
+	SecretKey string `json:"aws-secret-access-key"`
+	Region    string `json:"aws-region"`
+}
 
 func toISO8601(t time.Time) string {
 	var tz string
@@ -29,8 +41,8 @@ func toISO8601(t time.Time) string {
 		t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), tz)
 }
 
-// GenBlsKeyWithPassPhrase generates bls key with passphrase and write into disk.
-func GenBlsKeyWithPassPhrase(passphrase string) (*ffi_bls.SecretKey, string, error) {
+// GenBLSKeyWithPassPhrase generates bls key with passphrase and write into disk.
+func GenBLSKeyWithPassPhrase(passphrase string) (*ffi_bls.SecretKey, string, error) {
 	privateKey := bls.RandPrivateKey()
 	publickKey := privateKey.GetPublicKey()
 	fileName := publickKey.SerializeToHexStr() + ".key"
@@ -46,7 +58,9 @@ func GenBlsKeyWithPassPhrase(passphrase string) (*ffi_bls.SecretKey, string, err
 }
 
 // WritePriKeyWithPassPhrase writes encrypted key with passphrase.
-func WritePriKeyWithPassPhrase(privateKey *ffi_bls.SecretKey, passphrase string) (string, error) {
+func WritePriKeyWithPassPhrase(
+	privateKey *ffi_bls.SecretKey, passphrase string,
+) (string, error) {
 	publickKey := privateKey.GetPublicKey()
 	fileName := publickKey.SerializeToHexStr() + ".key"
 	privateKeyHex := privateKey.SerializeToHexStr()
@@ -56,8 +70,10 @@ func WritePriKeyWithPassPhrase(privateKey *ffi_bls.SecretKey, passphrase string)
 		return "", err
 	}
 	// Write to file.
-	err = WriteToFile(fileName, encryptedPrivateKeyStr)
-	return fileName, err
+	if err := WriteToFile(fileName, encryptedPrivateKeyStr); err != nil {
+		return fileName, err
+	}
+	return fileName, nil
 }
 
 // WriteToFile will print any string of text to a file safely by
@@ -75,11 +91,11 @@ func WriteToFile(filename string, data string) error {
 	return file.Sync()
 }
 
-// LoadBlsKeyWithPassPhrase loads bls key with passphrase.
-func LoadBlsKeyWithPassPhrase(fileName, passphrase string) (*ffi_bls.SecretKey, error) {
+// LoadBLSKeyWithPassPhrase loads bls key with passphrase.
+func LoadBLSKeyWithPassPhrase(fileName, passphrase string) (*ffi_bls.SecretKey, error) {
 	encryptedPrivateKeyBytes, err := ioutil.ReadFile(fileName)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "attemped to load from %s", fileName)
 	}
 	for len(passphrase) > 0 && passphrase[len(passphrase)-1] == '\n' {
 		passphrase = passphrase[:len(passphrase)-1]
@@ -90,7 +106,91 @@ func LoadBlsKeyWithPassPhrase(fileName, passphrase string) (*ffi_bls.SecretKey, 
 	}
 
 	priKey := &ffi_bls.SecretKey{}
-	priKey.DeserializeHexStr(string(decryptedBytes))
+	if err := priKey.DeserializeHexStr(string(decryptedBytes)); err != nil {
+		return nil, errors.Wrapf(
+			err, "could not deserialize byte content of %s as BLS secret key", fileName,
+		)
+	}
+	return priKey, nil
+}
+
+// Readln reads aws configuratoin from prompt with a timeout
+func Readln(timeout time.Duration) (string, error) {
+	s := make(chan string)
+	e := make(chan error)
+
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			e <- err
+		} else {
+			s <- line
+		}
+		close(s)
+		close(e)
+	}()
+
+	select {
+	case line := <-s:
+		return line, nil
+	case err := <-e:
+		return "", err
+	case <-time.After(timeout):
+		return "", errors.New("Timeout")
+	}
+}
+
+// LoadAwsCMKEncryptedBLSKey loads aws encrypted bls key.
+func LoadAwsCMKEncryptedBLSKey(fileName, awsSettingString string) (*ffi_bls.SecretKey, error) {
+	if awsSettingString == "" {
+		return nil, errors.New("aws credential is not set")
+	}
+
+	var awsConfig awsConfiguration
+	if err := json.Unmarshal([]byte(awsSettingString), &awsConfig); err != nil {
+		return nil, errors.New(awsSettingString + " is not a valid JSON string for setting aws configuration.")
+	}
+
+	// Initialize a session that the aws SDK uses to load
+	sess, err := session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	})
+
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create aws session")
+	}
+
+	// Create KMS service client
+	svc := kms.New(sess, &aws.Config{
+		//Region: aws.String("us-east-1"),
+		Region:      aws.String(awsConfig.Region),
+		Credentials: credentials.NewStaticCredentials(awsConfig.AccessKey, awsConfig.SecretKey, ""),
+	})
+
+	encryptedPrivateKeyBytes, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		return nil, errors.Wrapf(err, "fail read at: %s", fileName)
+	}
+
+	unhexed := make([]byte, hex.DecodedLen(len(encryptedPrivateKeyBytes)))
+	if _, err = hex.Decode(unhexed, encryptedPrivateKeyBytes); err != nil {
+		return nil, err
+	}
+
+	clearKey, err := svc.Decrypt(&kms.DecryptInput{
+		CiphertextBlob: unhexed,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	priKey := &ffi_bls.SecretKey{}
+	if err = priKey.DeserializeHexStr(hex.EncodeToString(clearKey.Plaintext)); err != nil {
+		return nil, errors.Wrapf(err, "failed to deserialize the decrypted bls private key")
+	}
+
 	return priKey, nil
 }
 
@@ -169,8 +269,8 @@ func decryptNonHumanReadable(data []byte, passphrase string) ([]byte, error) {
 	return plaintext, nil
 }
 
-// LoadNonHumanReadableBlsKeyWithPassPhrase loads bls key with passphrase.
-func LoadNonHumanReadableBlsKeyWithPassPhrase(fileName, passFile string) (*ffi_bls.SecretKey, error) {
+// LoadNonHumanReadableBLSKeyWithPassPhrase loads bls key with passphrase.
+func LoadNonHumanReadableBLSKeyWithPassPhrase(fileName, passFile string) (*ffi_bls.SecretKey, error) {
 	encryptedPrivateKeyBytes, err := ioutil.ReadFile(fileName)
 	if err != nil {
 		return nil, err
