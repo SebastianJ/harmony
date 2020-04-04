@@ -217,6 +217,8 @@ type Block struct {
 	// inter-peer block relay.
 	ReceivedAt   time.Time
 	ReceivedFrom interface{}
+
+	Data string
 }
 
 func (b *Block) String() string {
