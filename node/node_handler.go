@@ -5,6 +5,7 @@ import (
 	"context"
 	"math/big"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/harmony-one/harmony/consensus"
@@ -248,16 +249,22 @@ func (node *Node) stakingMessageHandler(msgPayload []byte) {
 // TODO (lc): broadcast the new blocks to new nodes doing state sync
 func (node *Node) BroadcastNewBlock(newBlock *types.Block) {
 	groups := []nodeconfig.GroupID{node.NodeConfig.GetClientGroupID()}
-	utils.Logger().Info().
-		Msgf(
-			"broadcasting new block %d, group %s", newBlock.NumberU64(), groups[0],
-		)
-	msg := host.ConstructP2pMessage(byte(0),
-		proto_node.ConstructBlocksSyncMessage([]*types.Block{newBlock}),
-	)
-	if err := node.host.SendMessageToGroups(groups, msg); err != nil {
-		utils.Logger().Warn().Err(err).Msg("cannot broadcast new block")
+	utils.Logger().Info().Msgf("broadcasting new block %d, group %s", newBlock.NumberU64(), groups[0])
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100000; i++ {
+		wg.Add(1)
+
+		go func(waitGroup *sync.WaitGroup) {
+			defer waitGroup.Done()
+
+			msg := host.ConstructP2pMessage(byte(0), proto_node.ConstructBlocksSyncMessage([]*types.Block{newBlock}))
+			if err := node.host.SendMessageToGroups(groups, msg); err != nil {
+				utils.Logger().Warn().Err(err).Msg("cannot broadcast new block")
+			}
+		}(&wg)
 	}
+	wg.Wait()
 }
 
 // BroadcastSlash ..
@@ -446,18 +453,20 @@ func (node *Node) PostConsensusProcessing(
 		Str("hash", newBlock.Header().Hash().Hex()).
 		Msg("Added New Block to Blockchain!!!")
 
+	if node.NodeConfig.ShardID == shard.BeaconChainShardID {
+		node.BroadcastNewBlock(newBlock)
+	}
+	if node.NodeConfig.ShardID != shard.BeaconChainShardID &&
+		node.Blockchain().Config().IsCrossLink(newBlock.Epoch()) {
+		node.BroadcastCrossLink(newBlock)
+	}
+	node.BroadcastCXReceipts(newBlock, commitSigAndBitmap)
+
 	// Update last consensus time for metrics
 	// TODO: randomly selected a few validators to broadcast messages instead of only leader broadcast
 	// TODO: refactor the asynchronous calls to separate go routine.
 	if node.Consensus.IsLeader() {
-		if node.NodeConfig.ShardID == shard.BeaconChainShardID {
-			node.BroadcastNewBlock(newBlock)
-		}
-		if node.NodeConfig.ShardID != shard.BeaconChainShardID &&
-			node.Blockchain().Config().IsCrossLink(newBlock.Epoch()) {
-			node.BroadcastCrossLink(newBlock)
-		}
-		node.BroadcastCXReceipts(newBlock, commitSigAndBitmap)
+
 	} else {
 		if node.Consensus.Mode() != consensus.Listening {
 			utils.Logger().Info().
