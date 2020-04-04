@@ -165,12 +165,21 @@ func (s *Service) Init() error {
 
 	// We use a rendezvous point "shardID" to announce our location.
 	utils.Logger().Info().Str("Rendezvous", string(s.Rendezvous)).Msg("Announcing ourselves...")
+
+	fmt.Printf("\n\n\n Rendezvous - Announcing ourselves - rendezvous message: %s\n\n\n", string(s.Rendezvous))
+
 	s.discovery = libp2pdis.NewRoutingDiscovery(s.dht)
+
+	fmt.Printf("\n\n\n Rendezvous - Advertising ourselves - rendezvous message: %s\n\n\n", string(s.Rendezvous))
+
 	libp2pdis.Advertise(ctx, s.discovery, string(s.Rendezvous))
 
 	// Everyone is beacon client, which means everyone is connected via beacon client topic
 	// 0 is beacon chain FIXME: use a constant
 	libp2pdis.Advertise(ctx, s.discovery, string(nodeconfig.NewClientGroupIDByShardID(0)))
+
+	fmt.Printf("\n\n\n Rendezvous - Advertising ourselves (beacon) - rendezvous message: %s\n\n\n", string(nodeconfig.NewClientGroupIDByShardID(0)))
+
 	utils.Logger().Info().Msg("Successfully announced!")
 
 	return nil

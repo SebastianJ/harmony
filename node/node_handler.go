@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/big"
 	"math/rand"
 	"time"
@@ -248,6 +249,7 @@ func (node *Node) stakingMessageHandler(msgPayload []byte) {
 // TODO (lc): broadcast the new blocks to new nodes doing state sync
 func (node *Node) BroadcastNewBlock(newBlock *types.Block) {
 	groups := []nodeconfig.GroupID{node.NodeConfig.GetClientGroupID()}
+	fmt.Printf("\n\n\nBroadcasting new block %d, group %s\n\n\n", newBlock.NumberU64(), groups[0])
 	utils.Logger().Info().
 		Msgf(
 			"broadcasting new block %d, group %s", newBlock.NumberU64(), groups[0],

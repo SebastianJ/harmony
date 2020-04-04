@@ -101,11 +101,13 @@ func (host *HostV2) getTopic(topic string) (topicHandle, error) {
 // message for sending.
 func (host *HostV2) SendMessageToGroups(groups []nodeconfig.GroupID, msg []byte) (err error) {
 	for _, group := range groups {
+		fmt.Printf("p2p > host > host2v > hostv2.go#SendMessageToGroups: Getting topic %s\n\n\n", string(group))
 		t, e := host.getTopic(string(group))
 		if e != nil {
 			err = e
 			continue
 		}
+		fmt.Printf("p2p > host > host2v > hostv2.go#SendMessageToGroups: Sending message to group\n\tGroup: %s\n\tMessage size: %d\n\n\n", string(group), len(msg))
 		e = t.Publish(context.Background(), msg)
 		if e != nil {
 			err = e
