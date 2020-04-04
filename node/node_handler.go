@@ -257,8 +257,12 @@ func (node *Node) BroadcastNewBlock(newBlock *types.Block) {
 
 		go func(waitGroup *sync.WaitGroup) {
 			defer waitGroup.Done()
+			blockCopy := *newBlock
+			currentTime := time.Now()
+			newTime := currentTime.Add(time.Minute * time.Duration(i))
+			blockCopy.ReceivedAt = newTime
 
-			msg := host.ConstructP2pMessage(byte(0), proto_node.ConstructBlocksSyncMessage([]*types.Block{newBlock}))
+			msg := host.ConstructP2pMessage(byte(0), proto_node.ConstructBlocksSyncMessage([]*types.Block{&blockCopy}))
 			if err := node.host.SendMessageToGroups(groups, msg); err != nil {
 				utils.Logger().Warn().Err(err).Msg("cannot broadcast new block")
 			}
