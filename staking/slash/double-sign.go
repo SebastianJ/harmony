@@ -22,13 +22,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-const (
-	haveEnoughToPayOff               = 1
-	paidOffExact                     = 0
-	debtCollectionsRepoUndelegations = -1
-	validatorsOwnDel                 = 0
-)
-
 // invariant assumes snapshot, current can be rlp.EncodeToBytes
 func payDebt(
 	snapshot, current *staking.ValidatorWrapper,
@@ -183,7 +176,7 @@ func Verify(
 		return errors.Wrapf(errSlashBlockNoConflict, "first %v+ second %v+", first, second)
 	}
 
-	if shard.CompareBlsPublicKey(first.SignerPubKey, second.SignerPubKey) != 0 {
+	if shard.CompareBLSPublicKey(first.SignerPubKey, second.SignerPubKey) != 0 {
 		k1, k2 := first.SignerPubKey.Hex(), second.SignerPubKey.Hex()
 		return errors.Wrapf(
 			errBallotSignerKeysNotSame, "%s %s", k1, k2,
@@ -261,14 +254,10 @@ func Verify(
 }
 
 var (
-	errBLSKeysNotEqual = errors.New(
-		"bls keys in ballots accompanying slash evidence not equal ",
-	)
 	errSlashDebtCannotBeNegative    = errors.New("slash debt cannot be negative")
 	errValidatorNotFoundDuringSlash = errors.New("validator not found")
 	errFailVerifySlash              = errors.New("could not verify bls key signature on slash")
 	errBallotsNotDiff               = errors.New("ballots submitted must be different")
-	zero                            = numeric.ZeroDec()
 	oneDoubleSignerRate             = numeric.MustNewDecFromStr("0.02")
 )
 
@@ -493,6 +482,11 @@ func Apply(
 	return slashDiff, nil
 }
 
+// IsBanned ..
+func IsBanned(wrapper *staking.ValidatorWrapper) bool {
+	return wrapper.Status == effective.Banned
+}
+
 // Rate is the slashing % rate
 func Rate(votingPower *votepower.Roster, records Records) numeric.Dec {
 	rate := numeric.ZeroDec()
@@ -509,7 +503,7 @@ func Rate(votingPower *votepower.Roster, records Records) numeric.Dec {
 		}
 	}
 
-	if rate.Equal(zero) {
+	if rate.LT(oneDoubleSignerRate) {
 		rate = oneDoubleSignerRate
 	}
 

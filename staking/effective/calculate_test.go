@@ -19,7 +19,6 @@ const eposTestingFile = "epos.json"
 
 var (
 	testingNumber    = 20
-	testingSlots     slotsData
 	testingPurchases []SlotPurchase
 	expectedMedian   numeric.Dec
 	maxAccountGen    = int64(98765654323123134)
@@ -60,7 +59,7 @@ func generateRandomSlots(num int) []SlotPurchase {
 		addr.SetBytes(big.NewInt(int64(accountGen.Int63n(maxAccountGen))).Bytes())
 		secretKey := bls.SecretKey{}
 		secretKey.Deserialize(big.NewInt(int64(keyGen.Int63n(maxKeyGen))).Bytes())
-		key := shard.BlsPublicKey{}
+		key := shard.BLSPublicKey{}
 		key.FromLibBLSPublicKey(secretKey.GetPublicKey())
 		stake := numeric.NewDecFromBigInt(big.NewInt(int64(stakeGen.Int63n(maxStakeGen))))
 		randomSlots = append(randomSlots, SlotPurchase{addr, key, stake})

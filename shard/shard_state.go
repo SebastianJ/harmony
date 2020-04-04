@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	emptyBlsPubKey = BlsPublicKey{}
+	emptyBLSPubKey = BLSPublicKey{}
 	// ErrShardIDNotInSuperCommittee ..
 	ErrShardIDNotInSuperCommittee = errors.New("shardID not in super committee")
 )
@@ -38,8 +38,8 @@ type State struct {
 	Shards []Committee `json:"shards"`
 }
 
-// BlsPublicKey defines the bls public key
-type BlsPublicKey [PublicKeySizeInBytes]byte
+// BLSPublicKey defines the bls public key
+type BLSPublicKey [PublicKeySizeInBytes]byte
 
 // BLSSignature defines the bls signature
 type BLSSignature [BLSSignatureSizeInBytes]byte
@@ -47,7 +47,7 @@ type BLSSignature [BLSSignatureSizeInBytes]byte
 // Slot represents node id (BLS address)
 type Slot struct {
 	EcdsaAddress common.Address `json:"ecdsa-address"`
-	BlsPublicKey BlsPublicKey   `json:"bls-pubkey"`
+	BLSPublicKey BLSPublicKey   `json:"bls-pubkey"`
 	// nil means our node, 0 means not active, > 0 means staked node
 	EffectiveStake *numeric.Dec `json:"effective-stake" rlp:"nil"`
 }
@@ -64,7 +64,7 @@ type Committee struct {
 func (l SlotList) String() string {
 	blsKeys := make([]string, len(l))
 	for i, k := range l {
-		blsKeys[i] = k.BlsPublicKey.Hex()
+		blsKeys[i] = k.BLSPublicKey.Hex()
 	}
 	s, _ := json.Marshal(blsKeys)
 	return string(s)
@@ -81,7 +81,7 @@ type StateLegacy []CommitteeLegacy
 // SlotLegacy represents node id (BLS address)
 type SlotLegacy struct {
 	EcdsaAddress common.Address `json:"ecdsa-address"`
-	BlsPublicKey BlsPublicKey   `json:"bls-pubkey"`
+	BLSPublicKey BLSPublicKey   `json:"bls-pubkey"`
 }
 
 // SlotListLegacy is a list of SlotList.
@@ -113,7 +113,7 @@ func DecodeWrapper(shardState []byte) (*State, error) {
 			newSS.Shards[i] = Committee{ShardID: oldSS[i].ShardID, Slots: SlotList{}}
 			for _, slot := range oldSS[i].Slots {
 				newSS.Shards[i].Slots = append(newSS.Shards[i].Slots, Slot{
-					slot.EcdsaAddress, slot.BlsPublicKey, nil,
+					slot.EcdsaAddress, slot.BLSPublicKey, nil,
 				})
 			}
 		}
@@ -139,7 +139,7 @@ func EncodeWrapper(shardState State, isStaking bool) ([]byte, error) {
 			}
 			for _, slot := range shardState.Shards[i].Slots {
 				shardStateLegacy[i].Slots = append(shardStateLegacy[i].Slots, SlotLegacy{
-					slot.EcdsaAddress, slot.BlsPublicKey,
+					slot.EcdsaAddress, slot.BLSPublicKey,
 				})
 			}
 		}
@@ -150,29 +150,28 @@ func EncodeWrapper(shardState State, isStaking bool) ([]byte, error) {
 	return data, err
 }
 
-// StakedSlots gives overview of subset of shard state that is
-// coming via an stake, that is, view epos
+// StakedSlots gives overview of members
+// in a subcommittee (aka a shard)
 type StakedSlots struct {
 	CountStakedValidator int
 	CountStakedBLSKey    int
 	Addrs                []common.Address
 	LookupSet            map[common.Address]struct{}
+	TotalEffectiveStaked numeric.Dec
 }
 
-// StakedValidators filters for non-harmony operated nodes,
-// returns (
-//   totalStakedValidatorsCount, totalStakedBLSKeys,
-//   addrsOnNetworkSlice, addrsOnNetworkSet,
-// )
+// StakedValidators ..
 func (c Committee) StakedValidators() *StakedSlots {
 	countStakedValidator, countStakedBLSKey := 0, 0
 	networkWideSlice, networkWideSet :=
 		[]common.Address{}, map[common.Address]struct{}{}
-	for _, slot := range c.Slots {
+	totalEffectiveStake := numeric.ZeroDec()
 
+	for _, slot := range c.Slots {
 		// an external validator,
 		// non-nil EffectiveStake is how we known
 		if addr := slot.EcdsaAddress; slot.EffectiveStake != nil {
+			totalEffectiveStake = totalEffectiveStake.Add(*slot.EffectiveStake)
 			countStakedBLSKey++
 			if _, seen := networkWideSet[addr]; !seen {
 				countStakedValidator++
@@ -187,19 +186,27 @@ func (c Committee) StakedValidators() *StakedSlots {
 		CountStakedBLSKey:    countStakedBLSKey,
 		Addrs:                networkWideSlice,
 		LookupSet:            networkWideSet,
+		TotalEffectiveStaked: totalEffectiveStake,
 	}
 }
 
-// StakedValidators filters for non-harmony operated nodes,
-// returns (
-//   totalStakedValidatorsCount, totalStakedBLSKeys,
-//   addrsOnNetworkSlice, addrsOnNetworkSet,
-// )
+// TODO refactor with and update corresponding places
+// func (ss *State) StakedValidators() []*StakedSlots {
+// 	networkWide := make([]*StakedSlots, len(ss.Shards))
+// 	for i := range ss.Shards {
+// 		networkWide[i] = ss.Shards[i].StakedValidators()
+// 	}
+// 	return networkWide
+// }
+
+// StakedValidators here is supercommittee wide
 func (ss *State) StakedValidators() *StakedSlots {
 	countStakedValidator, countStakedBLSKey := 0, 0
 	networkWideSlice, networkWideSet :=
 		[]common.Address{},
 		map[common.Address]struct{}{}
+
+	totalEffectiveStake := numeric.ZeroDec()
 
 	for i := range ss.Shards {
 		shard := ss.Shards[i]
@@ -209,6 +216,7 @@ func (ss *State) StakedValidators() *StakedSlots {
 			// an external validator,
 			// non-nil EffectiveStake is how we known
 			if addr := slot.EcdsaAddress; slot.EffectiveStake != nil {
+				totalEffectiveStake = totalEffectiveStake.Add(*slot.EffectiveStake)
 				countStakedBLSKey++
 				if _, seen := networkWideSet[addr]; !seen {
 					countStakedValidator++
@@ -224,6 +232,7 @@ func (ss *State) StakedValidators() *StakedSlots {
 		CountStakedBLSKey:    countStakedBLSKey,
 		Addrs:                networkWideSlice,
 		LookupSet:            networkWideSet,
+		TotalEffectiveStaked: totalEffectiveStake,
 	}
 }
 
@@ -252,7 +261,7 @@ func (ss *State) MarshalJSON() ([]byte, error) {
 		dump[i].Count = c
 		for j := range ss.Shards[i].Slots {
 			n := ss.Shards[i].Slots[j]
-			dump[i].NodeList[j].BlsPublicKey = n.BlsPublicKey
+			dump[i].NodeList[j].BLSPublicKey = n.BLSPublicKey
 			dump[i].NodeList[j].EffectiveStake = n.EffectiveStake
 			dump[i].NodeList[j].EcdsaAddress = common2.MustAddressToBech32(n.EcdsaAddress)
 		}
@@ -287,23 +296,23 @@ func (ss *State) DeepCopy() *State {
 }
 
 // Big ..
-func (pk BlsPublicKey) Big() *big.Int {
+func (pk BLSPublicKey) Big() *big.Int {
 	return new(big.Int).SetBytes(pk[:])
 }
 
 // IsEmpty returns whether the bls public key is empty 0 bytes
-func (pk BlsPublicKey) IsEmpty() bool {
-	return bytes.Compare(pk[:], emptyBlsPubKey[:]) == 0
+func (pk BLSPublicKey) IsEmpty() bool {
+	return bytes.Equal(pk[:], emptyBLSPubKey[:])
 }
 
 // Hex returns the hex string of bls public key
-func (pk BlsPublicKey) Hex() string {
+func (pk BLSPublicKey) Hex() string {
 	return hex.EncodeToString(pk[:])
 }
 
 // MarshalText so that we can use this as JSON printable when used as
 // key in a map
-func (pk BlsPublicKey) MarshalText() (text []byte, err error) {
+func (pk BLSPublicKey) MarshalText() (text []byte, err error) {
 	text = make([]byte, BLSSignatureSizeInBytes)
 	hex.Encode(text, pk[:])
 	return text, nil
@@ -311,8 +320,8 @@ func (pk BlsPublicKey) MarshalText() (text []byte, err error) {
 
 // FromLibBLSPublicKeyUnsafe could give back nil, use only in cases when
 // have invariant that return value won't be nil
-func FromLibBLSPublicKeyUnsafe(key *bls.PublicKey) *BlsPublicKey {
-	result := &BlsPublicKey{}
+func FromLibBLSPublicKeyUnsafe(key *bls.PublicKey) *BLSPublicKey {
+	result := &BLSPublicKey{}
 	if err := result.FromLibBLSPublicKey(key); err != nil {
 		return nil
 	}
@@ -320,7 +329,7 @@ func FromLibBLSPublicKeyUnsafe(key *bls.PublicKey) *BlsPublicKey {
 }
 
 // FromLibBLSPublicKey replaces the key contents with the given key,
-func (pk *BlsPublicKey) FromLibBLSPublicKey(key *bls.PublicKey) error {
+func (pk *BLSPublicKey) FromLibBLSPublicKey(key *bls.PublicKey) error {
 	bytes := key.Serialize()
 	if len(bytes) != len(pk) {
 		return ctxerror.New("BLS public key size mismatch",
@@ -332,12 +341,12 @@ func (pk *BlsPublicKey) FromLibBLSPublicKey(key *bls.PublicKey) error {
 }
 
 // ToLibBLSPublicKey copies the key contents into the given key.
-func (pk *BlsPublicKey) ToLibBLSPublicKey(key *bls.PublicKey) error {
+func (pk *BLSPublicKey) ToLibBLSPublicKey(key *bls.PublicKey) error {
 	return key.Deserialize(pk[:])
 }
 
-// CompareBlsPublicKey compares two BlsPublicKey, lexicographically.
-func CompareBlsPublicKey(k1, k2 BlsPublicKey) int {
+// CompareBLSPublicKey compares two BLSPublicKey, lexicographically.
+func CompareBLSPublicKey(k1, k2 BLSPublicKey) int {
 	return bytes.Compare(k1[:], k2[:])
 }
 
@@ -346,7 +355,7 @@ func CompareNodeID(id1, id2 *Slot) int {
 	if c := bytes.Compare(id1.EcdsaAddress[:], id2.EcdsaAddress[:]); c != 0 {
 		return c
 	}
-	if c := CompareBlsPublicKey(id1.BlsPublicKey, id2.BlsPublicKey); c != 0 {
+	if c := CompareBLSPublicKey(id1.BLSPublicKey, id2.BLSPublicKey); c != 0 {
 		return c
 	}
 	return 0
@@ -403,7 +412,7 @@ func lookupBLSPublicKeys(
 			slice := make([]*bls.PublicKey, len(c.Slots))
 			for j := range c.Slots {
 				committerKey := &bls.PublicKey{}
-				if err := c.Slots[j].BlsPublicKey.ToLibBLSPublicKey(
+				if err := c.Slots[j].BLSPublicKey.ToLibBLSPublicKey(
 					committerKey,
 				); err != nil {
 					return nil, err
@@ -443,13 +452,13 @@ var (
 )
 
 // AddressForBLSKey ..
-func (c *Committee) AddressForBLSKey(key BlsPublicKey) (*common.Address, error) {
+func (c *Committee) AddressForBLSKey(key BLSPublicKey) (*common.Address, error) {
 	if c == nil {
 		return nil, ErrSubCommitteeNil
 	}
 
 	for _, slot := range c.Slots {
-		if CompareBlsPublicKey(slot.BlsPublicKey, key) == 0 {
+		if CompareBLSPublicKey(slot.BLSPublicKey, key) == 0 {
 			return &slot.EcdsaAddress, nil
 		}
 	}
@@ -474,7 +483,7 @@ func CompareCommittee(c1, c2 *Committee) int {
 // NOTE: do not modify the underlining content for hash
 func GetHashFromNodeList(nodeList []Slot) []byte {
 	// in general, nodeList should not be empty
-	if nodeList == nil || len(nodeList) == 0 {
+	if len(nodeList) == 0 {
 		return []byte{}
 	}
 
@@ -504,7 +513,7 @@ func (ss *State) Hash() (h common.Hash) {
 
 // Serialize serialize Slot into bytes
 func (n Slot) Serialize() []byte {
-	return append(n.EcdsaAddress[:], n.BlsPublicKey[:]...)
+	return append(n.EcdsaAddress[:], n.BLSPublicKey[:]...)
 }
 
 func (n Slot) String() string {
@@ -512,5 +521,10 @@ func (n Slot) String() string {
 	if n.EffectiveStake != nil {
 		total = n.EffectiveStake.String()
 	}
-	return "ECDSA: " + common2.MustAddressToBech32(n.EcdsaAddress) + ", BLS: " + hex.EncodeToString(n.BlsPublicKey[:]) + ", EffectiveStake: " + total
+	return "ECDSA: " +
+		common2.MustAddressToBech32(n.EcdsaAddress) +
+		", BLS: " +
+		hex.EncodeToString(n.BLSPublicKey[:]) +
+		", EffectiveStake: " +
+		total
 }

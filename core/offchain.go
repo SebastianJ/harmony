@@ -1,7 +1,9 @@
 package core
 
 import (
+	"bytes"
 	"math/big"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -12,6 +14,7 @@ import (
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/shard"
 	"github.com/harmony-one/harmony/staking/slash"
+	staking "github.com/harmony-one/harmony/staking/types"
 	"github.com/pkg/errors"
 )
 
@@ -208,11 +211,68 @@ func (bc *BlockChain) CommitOffChainData(
 	// Update block reward accumulator and slashes
 	if isBeaconChain {
 		if isStaking {
+			roundResult := payout.ReadRoundResult()
 			if err := bc.UpdateBlockRewardAccumulator(
-				batch, payout.ReadRoundResult().Total, block.Number().Uint64(),
+				batch, roundResult.Total, block.Number().Uint64(),
 			); err != nil {
 				return NonStatTy, err
 			}
+			tempValidatorStats := map[common.Address]*staking.ValidatorStats{}
+			for _, paid := range [...][]reward.Payout{
+				roundResult.BeaconchainAward, roundResult.ShardChainAward,
+			} {
+				for i := range paid {
+					stats, ok := tempValidatorStats[paid[i].Addr]
+					if !ok {
+						stats, err = bc.ReadValidatorStats(paid[i].Addr)
+						if err != nil {
+							utils.Logger().Info().Err(err).
+								Str("bls-earning-key", paid[i].EarningKey.Hex()).
+								Msg("could not read validator stats to update for earning per key")
+							continue
+						}
+						tempValidatorStats[paid[i].Addr] = stats
+					}
+					for j := range stats.MetricsPerShard {
+						if stats.MetricsPerShard[j].Vote.Identity == paid[i].EarningKey {
+							stats.MetricsPerShard[j].Earned.Add(
+								stats.MetricsPerShard[j].Earned,
+								paid[i].NewlyEarned,
+							)
+						}
+					}
+
+				}
+			}
+			type t struct {
+				addr  common.Address
+				stats *staking.ValidatorStats
+			}
+
+			sortedStats, i := make([]t, len(tempValidatorStats)), 0
+			for key := range tempValidatorStats {
+				sortedStats[i] = t{key, tempValidatorStats[key]}
+				i++
+			}
+
+			sort.SliceStable(
+				sortedStats,
+				func(i, j int) bool {
+					return bytes.Compare(
+						sortedStats[i].addr[:], sortedStats[j].addr[:],
+					) == -1
+				},
+			)
+			for _, stat := range sortedStats {
+				if err := rawdb.WriteValidatorStats(
+					batch, stat.addr, stat.stats,
+				); err != nil {
+					utils.Logger().Info().Err(err).
+						Str("validator address", stat.addr.Hex()).
+						Msg("could not update stats for validator")
+				}
+			}
+
 			records := slash.Records{}
 			if s := header.Slashes(); len(s) > 0 {
 				if err := rlp.DecodeBytes(s, &records); err != nil {

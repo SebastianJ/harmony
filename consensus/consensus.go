@@ -12,7 +12,6 @@ import (
 	"github.com/harmony-one/harmony/core"
 	"github.com/harmony-one/harmony/core/types"
 	bls_cosi "github.com/harmony-one/harmony/crypto/bls"
-	"github.com/harmony-one/harmony/internal/memprofiling"
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/multibls"
 	"github.com/harmony-one/harmony/p2p"
@@ -194,7 +193,7 @@ func (consensus *Consensus) GetConsensusLeaderPrivateKey() (*bls.SecretKey, erro
 
 // New create a new Consensus record
 func New(
-	host p2p.Host, shard uint32, leader p2p.Peer, multiBlsPriKey *multibls.PrivateKey,
+	host p2p.Host, shard uint32, leader p2p.Peer, multiBLSPriKey *multibls.PrivateKey,
 	Decider quorum.Decider,
 ) (*Consensus, error) {
 	consensus := Consensus{}
@@ -211,9 +210,9 @@ func New(
 	consensus.consensusTimeout = createTimeout()
 	consensus.validators.Store(leader.ConsensusPubKey.SerializeToHexStr(), leader)
 
-	if multiBlsPriKey != nil {
-		consensus.priKey = multiBlsPriKey
-		consensus.PubKey = multiBlsPriKey.GetPublicKey()
+	if multiBLSPriKey != nil {
+		consensus.priKey = multiBLSPriKey
+		consensus.PubKey = multiBLSPriKey.GetPublicKey()
 		utils.Logger().Info().
 			Str("publicKey", consensus.PubKey.SerializeToHexStr()).Msg("My Public Key")
 	} else {
@@ -235,6 +234,5 @@ func New(
 	consensus.lastBlockReward = common.Big0
 	// channel for receiving newly generated VDF
 	consensus.RndChannel = make(chan [vdfAndSeedSize]byte)
-	memprofiling.GetMemProfiling().Add("consensus.FBFTLog", consensus.FBFTLog)
 	return &consensus, nil
 }

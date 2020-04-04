@@ -26,7 +26,7 @@ const (
 	MaxWebsiteLength         = 140
 	MaxSecurityContactLength = 140
 	MaxDetailsLength         = 280
-	BlsVerificationStr       = "harmony-one"
+	BLSVerificationStr       = "harmony-one"
 	TenThousand              = 10000
 )
 
@@ -121,7 +121,8 @@ func NewEmptyStats() *ValidatorStats {
 	return &ValidatorStats{
 		numeric.ZeroDec(),
 		numeric.ZeroDec(),
-		[]votepower.VoteOnSubcomittee{},
+		[]VoteWithCurrentEpochEarning{},
+		effective.NotBooted,
 	}
 }
 
@@ -139,6 +140,8 @@ type ValidatorRPCEnchanced struct {
 	TotalDelegated       *big.Int                 `json:"total-delegation"`
 	CurrentlyInCommittee bool                     `json:"currently-in-committee"`
 	EPoSStatus           string                   `json:"epos-status"`
+	EPoSWinningStake     *numeric.Dec             `json:"epos-winning-stake"`
+	BootedStatus         *string                  `json:"booted-status"`
 	Lifetime             *AccumulatedOverLifetime `json:"lifetime"`
 }
 
@@ -167,14 +170,22 @@ func (w ValidatorWrapper) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// VoteWithCurrentEpochEarning ..
+type VoteWithCurrentEpochEarning struct {
+	Vote   votepower.VoteOnSubcomittee `json:"key"`
+	Earned *big.Int                    `json:"earned-reward"`
+}
+
 // ValidatorStats to record validator's performance and history records
 type ValidatorStats struct {
 	// APR ..
 	APR numeric.Dec `json:"-"`
 	// TotalEffectiveStake is the total effective stake this validator has
-	TotalEffectiveStake numeric.Dec `json:"total-effective-stake"`
+	TotalEffectiveStake numeric.Dec `json:"-"`
 	// MetricsPerShard ..
-	MetricsPerShard []votepower.VoteOnSubcomittee `json:"by-shard"`
+	MetricsPerShard []VoteWithCurrentEpochEarning `json:"by-bls-key"`
+	// BootedStatus
+	BootedStatus effective.BootedStatus `json:"boot-from-committee-status"`
 }
 
 func (s ValidatorStats) String() string {
@@ -187,7 +198,7 @@ type Validator struct {
 	// ECDSA address of the validator
 	Address common.Address `json:"address"`
 	// The BLS public key of the validator for consensus
-	SlotPubKeys []shard.BlsPublicKey `json:"bls-public-keys"`
+	SlotPubKeys []shard.BLSPublicKey `json:"bls-public-keys"`
 	// The number of the last epoch this validator is
 	// selected in committee (0 means never selected)
 	LastEpochInCommittee *big.Int `json:"last-epoch-in-committee"`
@@ -288,7 +299,7 @@ func (v *Validator) SanityCheck(oneThirdExtrn int) error {
 		)
 	}
 
-	allKeys := map[shard.BlsPublicKey]struct{}{}
+	allKeys := map[shard.BLSPublicKey]struct{}{}
 	for i := range v.SlotPubKeys {
 		if _, ok := allKeys[v.SlotPubKeys[i]]; !ok {
 			allKeys[v.SlotPubKeys[i]] = struct{}{}
@@ -435,7 +446,7 @@ func (d Description) EnsureLength() (Description, error) {
 
 // VerifyBLSKeys checks if the public BLS key at index i of pubKeys matches the
 // BLS key signature at index i of pubKeysSigs.
-func VerifyBLSKeys(pubKeys []shard.BlsPublicKey, pubKeySigs []shard.BLSSignature) error {
+func VerifyBLSKeys(pubKeys []shard.BLSPublicKey, pubKeySigs []shard.BLSSignature) error {
 	if len(pubKeys) != len(pubKeySigs) {
 		return errBLSKeysNotMatchSigs
 	}
@@ -450,7 +461,7 @@ func VerifyBLSKeys(pubKeys []shard.BlsPublicKey, pubKeySigs []shard.BLSSignature
 }
 
 // VerifyBLSKey checks if the public BLS key matches the BLS signature
-func VerifyBLSKey(pubKey *shard.BlsPublicKey, pubKeySig *shard.BLSSignature) error {
+func VerifyBLSKey(pubKey *shard.BLSPublicKey, pubKeySig *shard.BLSSignature) error {
 	if len(pubKeySig) == 0 {
 		return errBLSKeysNotMatchSigs
 	}
@@ -465,7 +476,7 @@ func VerifyBLSKey(pubKey *shard.BlsPublicKey, pubKeySig *shard.BLSSignature) err
 		return err
 	}
 
-	messageBytes := []byte(BlsVerificationStr)
+	messageBytes := []byte(BLSVerificationStr)
 	msgHash := hash.Keccak256(messageBytes)
 	if !msgSig.VerifyHash(blsPubKey, msgHash[:]) {
 		return errBLSKeysNotMatchSigs
@@ -475,7 +486,7 @@ func VerifyBLSKey(pubKey *shard.BlsPublicKey, pubKeySig *shard.BLSSignature) err
 }
 
 func containsHarmonyBLSKeys(
-	blsKeys []shard.BlsPublicKey,
+	blsKeys []shard.BLSPublicKey,
 	hmyAccounts []genesis.DeployAccount,
 	epoch *big.Int,
 ) error {
@@ -490,7 +501,7 @@ func containsHarmonyBLSKeys(
 }
 
 func matchesHarmonyBLSKey(
-	blsKey *shard.BlsPublicKey,
+	blsKey *shard.BLSPublicKey,
 	hmyAccounts []genesis.DeployAccount,
 	epoch *big.Int,
 ) error {
@@ -503,7 +514,7 @@ func matchesHarmonyBLSKey(
 			cache[key] = map[publicKeyAsHex]struct{}{}
 			for i := range hmyAccounts {
 				// invariant assume it is hex
-				cache[key][hmyAccounts[i].BlsPublicKey] = struct{}{}
+				cache[key][hmyAccounts[i].BLSPublicKey] = struct{}{}
 			}
 		}
 

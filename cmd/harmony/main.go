@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/harmony-one/harmony/numeric"
-
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/harmony-one/bls/ffi/go/bls"
@@ -34,17 +32,16 @@ import (
 	viperconfig "github.com/harmony-one/harmony/internal/configs/viper"
 	"github.com/harmony-one/harmony/internal/genesis"
 	hmykey "github.com/harmony-one/harmony/internal/keystore"
-	"github.com/harmony-one/harmony/internal/memprofiling"
 	"github.com/harmony-one/harmony/internal/shardchain"
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/multibls"
 	"github.com/harmony-one/harmony/node"
+	"github.com/harmony-one/harmony/numeric"
 	"github.com/harmony-one/harmony/p2p"
 	"github.com/harmony-one/harmony/p2p/p2pimpl"
 	p2putils "github.com/harmony-one/harmony/p2p/utils"
 	"github.com/harmony-one/harmony/shard"
 	"github.com/harmony-one/harmony/staking/slash"
-	golog "github.com/ipfs/go-log"
 	"github.com/pkg/errors"
 	gologging "github.com/whyrusleeping/go-logging"
 )
@@ -105,13 +102,12 @@ var (
 	stakingFlag = flag.Bool("staking", false, "whether the node should operate in staking mode")
 	// shardID indicates the shard ID of this node
 	shardID            = flag.Int("shard_id", -1, "the shard ID of this node")
-	enableMemProfiling = flag.Bool("enableMemProfiling", false, "Enable memsize logging.")
-	enableGC           = flag.Bool("enableGC", true, "Enable calling garbage collector manually .")
+	cmkEncryptedBLSKey = flag.String("aws_blskey", "", "The aws CMK encrypted bls private key file.")
 	blsKeyFile         = flag.String("blskey_file", "", "The encrypted file of bls serialized private key by passphrase.")
 	blsFolder          = flag.String("blsfolder", ".hmy/blskeys", "The folder that stores the bls keys and corresponding passphrases; e.g. <blskey>.key and <blskey>.pass; all bls keys mapped to same shard")
 	blsPass            = flag.String("blspass", "", "The file containing passphrase to decrypt the encrypted bls file.")
 	blsPassphrase      string
-	maxBlsKeysPerNode  = flag.Int("max_bls_keys_per_node", 4, "maximum number of bls keys allowed per node (default 4)")
+	maxBLSKeysPerNode  = flag.Int("max_bls_keys_per_node", 4, "maximum number of bls keys allowed per node (default 4)")
 	// Sharding configuration parameters for devnet
 	devnetNumShards   = flag.Uint("dn_num_shards", 2, "number of shards for -network_type=devnet (default: 2)")
 	devnetShardSize   = flag.Int("dn_shard_size", 10, "number of nodes per shard for -network_type=devnet (default 10)")
@@ -130,11 +126,7 @@ var (
 	dbDir = flag.String("db_dir", "", "blockchain database directory")
 	// Disable view change.
 	disableViewChange = flag.Bool("disable_view_change", false, "Do not propose view change (testing only)")
-	// metrics flag to collct meetrics or not, pushgateway ip and port for metrics
-	metricsFlag     = flag.Bool("metrics", false, "Collect and upload node metrics")
-	pushgatewayIP   = flag.String("pushgateway_ip", "grafana.harmony.one", "Metrics view ip")
-	pushgatewayPort = flag.String("pushgateway_port", "9091", "Metrics view port")
-	publicRPC       = flag.Bool("public_rpc", false, "Enable Public RPC Access (default: false)")
+	publicRPC         = flag.Bool("public_rpc", false, "Enable Public RPC Access (default: false)")
 	// Bad block revert
 	doRevertBefore = flag.Int("do_revert_before", 0, "If the current block is less than do_revert_before, revert all blocks until (including) revert_to block")
 	revertTo       = flag.Int("revert_to", 0, "The revert will rollback all blocks until and including block number revert_to")
@@ -144,6 +136,8 @@ var (
 	webHookYamlPath = flag.String(
 		"webhook_yaml", "", "path for yaml config reporting double signing",
 	)
+	// aws credentials
+	awsSettingString = ""
 )
 
 func initSetup() {
@@ -154,7 +148,12 @@ func initSetup() {
 	}
 
 	// maybe request passphrase for bls key.
-	passphraseForBls()
+	if *cmkEncryptedBLSKey == "" {
+		passphraseForBLS()
+	} else {
+		// Get aws credentials from stdin prompt
+		awsSettingString, _ = blsgen.Readln(1 * time.Second)
+	}
 
 	// Configure log parameters
 	utils.SetLogContext(*port, *ip)
@@ -176,9 +175,6 @@ func initSetup() {
 	// Set sharding schedule
 	nodeconfig.SetShardingSchedule(shard.Schedule)
 
-	// Setup mem profiling.
-	memprofiling.GetMemProfiling().Config()
-
 	// Set default keystore Dir
 	hmykey.DefaultKeyStoreDir = *keystoreDir
 
@@ -195,7 +191,7 @@ func initSetup() {
 	}
 }
 
-func passphraseForBls() {
+func passphraseForBLS() {
 	// If FN node running, they should either specify blsPrivateKey or the file with passphrase
 	// However, explorer or non-validator nodes need no blskey
 	if *nodeType != "validator" {
@@ -230,23 +226,23 @@ func findAccountsByPubKeys(config shardingconfig.Instance, pubKeys []*bls.Public
 
 func setupLegacyNodeAccount() error {
 	genesisShardingConfig := shard.Schedule.InstanceForEpoch(big.NewInt(core.GenesisEpoch))
-	multiBlsPubKey := setupConsensusKey(nodeconfig.GetDefaultConfig())
+	multiBLSPubKey := setupConsensusKey(nodeconfig.GetDefaultConfig())
 
 	reshardingEpoch := genesisShardingConfig.ReshardingEpoch()
 	if reshardingEpoch != nil && len(reshardingEpoch) > 0 {
 		for _, epoch := range reshardingEpoch {
 			config := shard.Schedule.InstanceForEpoch(epoch)
-			findAccountsByPubKeys(config, multiBlsPubKey.PublicKey)
+			findAccountsByPubKeys(config, multiBLSPubKey.PublicKey)
 			if len(initialAccounts) != 0 {
 				break
 			}
 		}
 	} else {
-		findAccountsByPubKeys(genesisShardingConfig, multiBlsPubKey.PublicKey)
+		findAccountsByPubKeys(genesisShardingConfig, multiBLSPubKey.PublicKey)
 	}
 
 	if len(initialAccounts) == 0 {
-		fmt.Fprintf(os.Stderr, "ERROR cannot find your BLS key in the genesis/FN tables: %s\n", multiBlsPubKey.SerializeToHexStr())
+		fmt.Fprintf(os.Stderr, "ERROR cannot find your BLS key in the genesis/FN tables: %s\n", multiBLSPubKey.SerializeToHexStr())
 		os.Exit(100)
 	}
 
@@ -268,16 +264,18 @@ func setupStakingNodeAccount() error {
 	for _, blsKey := range pubKey.PublicKey {
 		initialAccount := &genesis.DeployAccount{}
 		initialAccount.ShardID = shardID
-		initialAccount.BlsPublicKey = blsKey.SerializeToHexStr()
+		initialAccount.BLSPublicKey = blsKey.SerializeToHexStr()
 		initialAccount.Address = ""
 		initialAccounts = append(initialAccounts, initialAccount)
 	}
 	return nil
 }
 
-func readMultiBlsKeys(consensusMultiBlsPriKey *multibls.PrivateKey, consensusMultiBlsPubKey *multibls.PublicKey) error {
+func readMultiBLSKeys(consensusMultiBLSPriKey *multibls.PrivateKey, consensusMultiBLSPubKey *multibls.PublicKey) error {
 	keyPasses := map[string]string{}
 	blsKeyFiles := []os.FileInfo{}
+	awsEncryptedBLSKeyFiles := []os.FileInfo{}
+
 	if err := filepath.Walk(*blsFolder, func(path string, info os.FileInfo, err error) error {
 		if info.IsDir() {
 			return nil
@@ -294,9 +292,11 @@ func readMultiBlsKeys(consensusMultiBlsPriKey *multibls.PrivateKey, consensusMul
 			}
 			name := fullName[:len(fullName)-len(ext)]
 			keyPasses[name] = passphrase
+		} else if ext == ".bls" {
+			awsEncryptedBLSKeyFiles = append(awsEncryptedBLSKeyFiles, info)
 		} else {
 			return errors.Errorf(
-				"[Multi-BLS] found file: %s that does not have .key or .pass file extension",
+				"[Multi-BLS] found file: %s that does not have .bls, .key or .pass file extension",
 				path,
 			)
 		}
@@ -309,29 +309,47 @@ func readMultiBlsKeys(consensusMultiBlsPriKey *multibls.PrivateKey, consensusMul
 		)
 		os.Exit(100)
 	}
-	if len(blsKeyFiles) > *maxBlsKeysPerNode {
+
+	keyFiles := []os.FileInfo{}
+	legacyBLSFile := true
+
+	if len(awsEncryptedBLSKeyFiles) > 0 {
+		keyFiles = awsEncryptedBLSKeyFiles
+		legacyBLSFile = false
+	} else {
+		keyFiles = blsKeyFiles
+	}
+
+	if len(keyFiles) > *maxBLSKeysPerNode {
 		fmt.Fprintf(os.Stderr,
 			"[Multi-BLS] maximum number of bls keys per node is %d, found: %d\n",
-			*maxBlsKeysPerNode,
-			len(blsKeyFiles),
+			*maxBLSKeysPerNode,
+			len(keyFiles),
 		)
 		os.Exit(100)
 	}
-	for _, blsKeyFile := range blsKeyFiles {
-		fullName := blsKeyFile.Name()
-		ext := filepath.Ext(fullName)
-		name := fullName[:len(fullName)-len(ext)]
-		if val, ok := keyPasses[name]; ok {
-			blsPassphrase = val
-		}
+
+	for _, blsKeyFile := range keyFiles {
+		var consensusPriKey *bls.SecretKey
+		var err error
 		blsKeyFilePath := path.Join(*blsFolder, blsKeyFile.Name())
-		consensusPriKey, err := blsgen.LoadBlsKeyWithPassPhrase(blsKeyFilePath, blsPassphrase)
+		if legacyBLSFile {
+			fullName := blsKeyFile.Name()
+			ext := filepath.Ext(fullName)
+			name := fullName[:len(fullName)-len(ext)]
+			if val, ok := keyPasses[name]; ok {
+				blsPassphrase = val
+			}
+			consensusPriKey, err = blsgen.LoadBLSKeyWithPassPhrase(blsKeyFilePath, blsPassphrase)
+		} else {
+			consensusPriKey, err = blsgen.LoadAwsCMKEncryptedBLSKey(blsKeyFilePath, awsSettingString)
+		}
 		if err != nil {
 			return err
 		}
 		// TODO: assumes order between public/private key pairs
-		multibls.AppendPriKey(consensusMultiBlsPriKey, consensusPriKey)
-		multibls.AppendPubKey(consensusMultiBlsPubKey, consensusPriKey.GetPublicKey())
+		multibls.AppendPriKey(consensusMultiBLSPriKey, consensusPriKey)
+		multibls.AppendPubKey(consensusMultiBLSPubKey, consensusPriKey.GetPublicKey())
 	}
 
 	return nil
@@ -342,15 +360,24 @@ func setupConsensusKey(nodeConfig *nodeconfig.ConfigType) multibls.PublicKey {
 	consensusMultiPubKey := &multibls.PublicKey{}
 
 	if *blsKeyFile != "" {
-		consensusPriKey, err := blsgen.LoadBlsKeyWithPassPhrase(*blsKeyFile, blsPassphrase)
+		consensusPriKey, err := blsgen.LoadBLSKeyWithPassPhrase(*blsKeyFile, blsPassphrase)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR when loading bls key, err :%v\n", err)
 			os.Exit(100)
 		}
 		multibls.AppendPriKey(consensusMultiPriKey, consensusPriKey)
 		multibls.AppendPubKey(consensusMultiPubKey, consensusPriKey.GetPublicKey())
+	} else if *cmkEncryptedBLSKey != "" {
+		consensusPriKey, err := blsgen.LoadAwsCMKEncryptedBLSKey(*cmkEncryptedBLSKey, awsSettingString)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR when loading aws CMK encrypted bls key, err :%v\n", err)
+			os.Exit(100)
+		}
+
+		multibls.AppendPriKey(consensusMultiPriKey, consensusPriKey)
+		multibls.AppendPubKey(consensusMultiPubKey, consensusPriKey.GetPublicKey())
 	} else {
-		err := readMultiBlsKeys(consensusMultiPriKey, consensusMultiPubKey)
+		err := readMultiBLSKeys(consensusMultiPriKey, consensusMultiPubKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[Multi-BLS] ERROR when loading bls keys, err :%v\n", err)
 			os.Exit(100)
@@ -383,21 +410,22 @@ func createGlobalConfig() (*nodeconfig.ConfigType, error) {
 	// Set network type
 	netType := nodeconfig.NetworkType(*networkType)
 	nodeconfig.SetNetworkType(netType) // sets for both global and shard configs
-	nodeConfig.SetPushgatewayIP(*pushgatewayIP)
-	nodeConfig.SetPushgatewayPort(*pushgatewayPort)
-	nodeConfig.SetMetricsFlag(*metricsFlag)
 	nodeConfig.SetArchival(*isArchival)
 
-	// P2p private key is used for secure message transfer between p2p nodes.
-	nodeConfig.P2pPriKey, _, err = utils.LoadKeyFromFile(*keyFile)
+	// P2P private key is used for secure message transfer between p2p nodes.
+	nodeConfig.P2PPriKey, _, err = utils.LoadKeyFromFile(*keyFile)
 	if err != nil {
 		return nil, errors.Wrapf(err, "cannot load or create P2P key at %#v",
 			*keyFile)
 	}
 
-	selfPeer := p2p.Peer{IP: *ip, Port: *port, ConsensusPubKey: nodeConfig.ConsensusPubKey.PublicKey[0]}
+	selfPeer := p2p.Peer{
+		IP:              *ip,
+		Port:            *port,
+		ConsensusPubKey: nodeConfig.ConsensusPubKey.PublicKey[0],
+	}
 
-	myHost, err = p2pimpl.NewHost(&selfPeer, nodeConfig.P2pPriKey)
+	myHost, err = p2pimpl.NewHost(&selfPeer, nodeConfig.P2PPriKey)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot create P2P network host")
 	}
@@ -437,7 +465,7 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 	// staking validator doesn't have to specify ECDSA address
 	currentConsensus.SelfAddresses = map[string]ethCommon.Address{}
 	for _, initialAccount := range initialAccounts {
-		currentConsensus.SelfAddresses[initialAccount.BlsPublicKey] = common.ParseAddr(initialAccount.Address)
+		currentConsensus.SelfAddresses[initialAccount.BLSPublicKey] = common.ParseAddr(initialAccount.Address)
 	}
 
 	if err != nil {
@@ -490,10 +518,6 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 	// TODO: refactor the creation of blockchain out of node.New()
 	currentConsensus.ChainReader = currentNode.Blockchain()
 	currentNode.NodeConfig.DNSZone = *dnsZone
-	// Set up prometheus pushgateway for metrics monitoring serivce.
-	currentNode.NodeConfig.SetPushgatewayIP(nodeConfig.PushgatewayIP)
-	currentNode.NodeConfig.SetPushgatewayPort(nodeConfig.PushgatewayPort)
-	currentNode.NodeConfig.SetMetricsFlag(nodeConfig.MetricsFlag)
 
 	currentNode.NodeConfig.SetBeaconGroupID(
 		nodeconfig.NewGroupIDByShardID(shard.BeaconChainShardID),
@@ -555,10 +579,6 @@ func setupConsensusAndNode(nodeConfig *nodeconfig.ConfigType) *node.Node {
 
 	// update consensus information based on the blockchain
 	currentConsensus.SetMode(currentConsensus.UpdateConsensusInformation())
-
-	// Watching currentNode and currentConsensus.
-	memprofiling.GetMemProfiling().Add("currentNode", currentNode)
-	memprofiling.GetMemProfiling().Add("currentConsensus", currentConsensus)
 	return currentNode
 }
 
@@ -583,13 +603,10 @@ func setupBlacklist() (map[ethCommon.Address]struct{}, error) {
 }
 
 func setupViperConfig() {
-
 	// read from environment
 	envViper := viperconfig.CreateEnvViper()
-
 	//read from config file
 	configFileViper := viperconfig.CreateConfFileViper("./.hmy", "nodeconfig", "json")
-
 	viperconfig.ResetConfString(ip, envViper, configFileViper, "", "ip")
 	viperconfig.ResetConfString(port, envViper, configFileViper, "", "port")
 	viperconfig.ResetConfString(logFolder, envViper, configFileViper, "", "log_folder")
@@ -598,7 +615,6 @@ func setupViperConfig() {
 	viperconfig.ResetConfBool(profile, envViper, configFileViper, "", "profile")
 	viperconfig.ResetConfString(metricsReportURL, envViper, configFileViper, "", "metrics_report_url")
 	viperconfig.ResetConfString(pprof, envViper, configFileViper, "", "pprof")
-
 	viperconfig.ResetConfBool(versionFlag, envViper, configFileViper, "", "version")
 	viperconfig.ResetConfBool(onlyLogTps, envViper, configFileViper, "", "only_log_tps")
 	viperconfig.ResetConfString(dnsZone, envViper, configFileViper, "", "dns_zone")
@@ -610,38 +626,30 @@ func setupViperConfig() {
 	viperconfig.ResetConfString(delayCommit, envViper, configFileViper, "", "delay_commit")
 	viperconfig.ResetConfString(nodeType, envViper, configFileViper, "", "node_type")
 	viperconfig.ResetConfString(networkType, envViper, configFileViper, "", "network_type")
-
 	viperconfig.ResetConfInt(syncFreq, envViper, configFileViper, "", "sync_freq")
 	viperconfig.ResetConfInt(beaconSyncFreq, envViper, configFileViper, "", "beacon_sync_freq")
 	viperconfig.ResetConfInt(blockPeriod, envViper, configFileViper, "", "block_period")
 	viperconfig.ResetConfBool(leaderOverride, envViper, configFileViper, "", "leader_override")
 	viperconfig.ResetConfBool(stakingFlag, envViper, configFileViper, "", "staking")
 	viperconfig.ResetConfInt(shardID, envViper, configFileViper, "", "shard_id")
-	viperconfig.ResetConfBool(enableMemProfiling, envViper, configFileViper, "", "enableMemProfiling")
-	viperconfig.ResetConfBool(enableGC, envViper, configFileViper, "", "enableGC")
 	viperconfig.ResetConfString(blsKeyFile, envViper, configFileViper, "", "blskey_file")
 	viperconfig.ResetConfString(blsFolder, envViper, configFileViper, "", "blsfolder")
 	viperconfig.ResetConfString(blsPass, envViper, configFileViper, "", "blsPass")
 	viperconfig.ResetConfUInt(devnetNumShards, envViper, configFileViper, "", "dn_num_shards")
 	viperconfig.ResetConfInt(devnetShardSize, envViper, configFileViper, "", "dn_shard_size")
 	viperconfig.ResetConfInt(devnetHarmonySize, envViper, configFileViper, "", "dn_hmy_size")
-
 	viperconfig.ResetConfBool(logConn, envViper, configFileViper, "", "log_conn")
 	viperconfig.ResetConfString(keystoreDir, envViper, configFileViper, "", "keystore")
 	viperconfig.ResetConfBool(logP2P, envViper, configFileViper, "", "log_p2p")
 	viperconfig.ResetConfInt(verbosity, envViper, configFileViper, "", "verbosity")
 	viperconfig.ResetConfString(dbDir, envViper, configFileViper, "", "db_dir")
 	viperconfig.ResetConfBool(disableViewChange, envViper, configFileViper, "", "disable_view_change")
-	viperconfig.ResetConfBool(metricsFlag, envViper, configFileViper, "", "metrics")
-	viperconfig.ResetConfString(pushgatewayIP, envViper, configFileViper, "", "pushgateway_ip")
-	viperconfig.ResetConfString(pushgatewayPort, envViper, configFileViper, "", "pushgateway_port")
 	viperconfig.ResetConfBool(publicRPC, envViper, configFileViper, "", "public_rpc")
 	viperconfig.ResetConfInt(doRevertBefore, envViper, configFileViper, "", "do_revert_before")
 	viperconfig.ResetConfInt(revertTo, envViper, configFileViper, "", "revert_to")
 	viperconfig.ResetConfBool(revertBeacon, envViper, configFileViper, "", "revert_beacon")
 	viperconfig.ResetConfString(blacklistPath, envViper, configFileViper, "", "blacklist")
 	viperconfig.ResetConfString(webHookYamlPath, envViper, configFileViper, "", "webhook_yaml")
-
 }
 
 func main() {
@@ -705,11 +713,6 @@ func main() {
 	setupViperConfig()
 
 	initSetup()
-
-	// Set up manual call for garbage collection.
-	if *enableGC {
-		memprofiling.MaybeCallGCPeriodically()
-	}
 
 	if *nodeType == "validator" {
 		var err error
@@ -800,46 +803,39 @@ func main() {
 	}
 
 	utils.Logger().Info().
-		Str("BlsPubKey", nodeConfig.ConsensusPubKey.SerializeToHexStr()).
+		Str("BLSPubKey", nodeConfig.ConsensusPubKey.SerializeToHexStr()).
 		Uint32("ShardID", nodeConfig.ShardID).
 		Str("ShardGroupID", nodeConfig.GetShardGroupID().String()).
 		Str("BeaconGroupID", nodeConfig.GetBeaconGroupID().String()).
 		Str("ClientGroupID", nodeConfig.GetClientGroupID().String()).
 		Str("Role", currentNode.NodeConfig.Role().String()).
-		Str("multiaddress", fmt.Sprintf("/ip4/%s/tcp/%s/p2p/%s", *ip, *port, myHost.GetID().Pretty())).
+		Str("multiaddress",
+			fmt.Sprintf("/ip4/%s/tcp/%s/p2p/%s", *ip, *port, myHost.GetID().Pretty()),
+		).
 		Msg(startMsg)
 
-	if *enableMemProfiling {
-		memprofiling.GetMemProfiling().Start()
-	}
-
 	if *logP2P {
-		f, err := os.OpenFile(path.Join(*logFolder, "libp2p.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(
+			path.Join(*logFolder, "libp2p.log"),
+			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644,
+		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to open libp2p.log. %v\n", err)
 		} else {
 			defer f.Close()
 			backend1 := gologging.NewLogBackend(f, "", 0)
 			gologging.SetBackend(backend1)
-			golog.SetAllLoggers(gologging.DEBUG) // Change to DEBUG for extra info
 		}
 	}
 
 	go currentNode.SupportSyncing()
 	currentNode.ServiceManagerSetup()
-
 	currentNode.RunServices()
 	// RPC for SDK not supported for mainnet.
 	if err := currentNode.StartRPC(*port); err != nil {
 		utils.Logger().Warn().
 			Err(err).
 			Msg("StartRPC failed")
-	}
-
-	// Run additional node collectors
-	// Collect node metrics if metrics flag is set
-	if currentNode.NodeConfig.GetMetricsFlag() {
-		go currentNode.CollectMetrics()
 	}
 
 	currentNode.StartServer()

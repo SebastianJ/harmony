@@ -51,6 +51,8 @@ import (
 	"github.com/harmony-one/harmony/shard"
 	"github.com/harmony-one/harmony/shard/committee"
 	"github.com/harmony-one/harmony/staking/apr"
+	"github.com/harmony-one/harmony/staking/availability"
+	"github.com/harmony-one/harmony/staking/effective"
 	"github.com/harmony-one/harmony/staking/slash"
 	staking "github.com/harmony-one/harmony/staking/types"
 	lru "github.com/hashicorp/golang-lru"
@@ -64,6 +66,7 @@ var (
 	ErrNoGenesis = errors.New("Genesis not found in chain")
 	// errExceedMaxPendingSlashes ..
 	errExceedMaxPendingSlashes = errors.New("exceeed max pending slashes")
+	errNilEpoch                = errors.New("nil epoch for voting power computation")
 )
 
 const (
@@ -2282,19 +2285,45 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 	batch rawdb.DatabaseWriter,
 	block *types.Block,
 	newEpochSuperCommittee, currentEpochSuperCommittee *shard.State,
-	// NOTE Do not update this state, only read from
 	state *state.DB,
 ) error {
 	if newEpochSuperCommittee == nil {
 		return shard.ErrSuperCommitteeNil
 	}
 
-	rosters := make([]*votepower.Roster, len(newEpochSuperCommittee.Shards))
+	rosters, bootedFromSuperCommittee :=
+		make([]*votepower.Roster, len(newEpochSuperCommittee.Shards)),
+		map[common.Address]struct{}{}
+
+	existing, replacing :=
+		currentEpochSuperCommittee.StakedValidators(),
+		newEpochSuperCommittee.StakedValidators()
+
+	// TODO could also keep track of the BLS keys which
+	// lost a slot because just losing slots doesn't mean that the
+	// validator was booted, just that some of their keys lost slots
+
+	for currentValidator := range existing.LookupSet {
+		if _, keptSlot := replacing.LookupSet[currentValidator]; !keptSlot {
+			bootedFromSuperCommittee[currentValidator] = struct{}{}
+			// NOTE Think carefully about when time comes to delete offchain things
+			// TODO Someone: collect and then delete every 30 epochs
+			// rawdb.DeleteValidatorSnapshot(
+			// 	bc.db, currentValidator, currentEpochSuperCommittee.Epoch,
+			// )
+			// rawdb.DeleteValidatorStats(bc.db, currentValidator)
+		}
+	}
 
 	for i := range newEpochSuperCommittee.Shards {
 		subCommittee := &newEpochSuperCommittee.Shards[i]
 		if newEpochSuperCommittee.Epoch == nil {
-			return errors.New("nil epoch for voting power computation")
+			return errors.Wrapf(
+				errNilEpoch,
+				"block epoch %v current-committee-epoch %v",
+				block.Epoch(),
+				currentEpochSuperCommittee.Epoch,
+			)
 		}
 		roster, err := votepower.Compute(subCommittee, newEpochSuperCommittee.Epoch)
 		if err != nil {
@@ -2302,7 +2331,9 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 		}
 		rosters[i] = roster
 	}
+
 	networkWide := votepower.AggregateRosters(rosters)
+
 	for key, value := range networkWide {
 		stats, err := rawdb.ReadValidatorStats(bc.db, key)
 		if err != nil {
@@ -2313,7 +2344,14 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 			total = total.Add(value[i].EffectiveStake)
 		}
 		stats.TotalEffectiveStake = total
-		stats.MetricsPerShard = value
+		earningWrapping := make([]staking.VoteWithCurrentEpochEarning, len(value))
+		for i := range value {
+			earningWrapping[i] = staking.VoteWithCurrentEpochEarning{
+				Vote:   value[i],
+				Earned: common.Big0,
+			}
+		}
+		stats.MetricsPerShard = earningWrapping
 		wrapper, err := state.ValidatorWrapper(key)
 		if err != nil {
 			return err
@@ -2335,23 +2373,32 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 			utils.Logger().Debug().Err(err).Msg("issue with compute of apr")
 		}
 
+		snapshot, err := bc.ReadValidatorSnapshotAtEpoch(
+			currentEpochSuperCommittee.Epoch, wrapper.Address,
+		)
+
+		if err != nil {
+			return err
+		}
+
+		computed := availability.ComputeCurrentSigning(snapshot, wrapper)
+
+		if _, wasBooted := bootedFromSuperCommittee[wrapper.Address]; wasBooted {
+			stats.BootedStatus = effective.LostEPoSAuction
+		}
+
+		if computed.IsBelowThreshold {
+			stats.BootedStatus = effective.InsufficientUptimeDuringEpoch
+		}
+
+		if slash.IsBanned(wrapper) {
+			stats.BootedStatus = effective.BannedForDoubleSigning
+		}
+
 		if err := rawdb.WriteValidatorStats(
 			batch, key, stats,
 		); err != nil {
 			return err
-		}
-	}
-
-	existing, replacing :=
-		currentEpochSuperCommittee.StakedValidators(),
-		newEpochSuperCommittee.StakedValidators()
-	for currentValidator := range existing.LookupSet {
-		if _, keptSlot := replacing.LookupSet[currentValidator]; !keptSlot {
-			// TODO Someone: collect and then delete every 30 epochs
-			// rawdb.DeleteValidatorSnapshot(
-			// 	bc.db, currentValidator, currentEpochSuperCommittee.Epoch,
-			// )
-			rawdb.DeleteValidatorStats(bc.db, currentValidator)
 		}
 	}
 
@@ -2360,19 +2407,20 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 
 // deleteValidatorSnapshots deletes the snapshot staking information of given validator address
 // TODO: delete validator snapshots from X epochs ago
-func (bc *BlockChain) deleteValidatorSnapshots(addrs []common.Address) error {
-	batch := bc.db.NewBatch()
-	for i := range addrs {
-		rawdb.DeleteValidatorSnapshot(batch, addrs[i], bc.CurrentBlock().Epoch())
-	}
-	if err := batch.Write(); err != nil {
-		return err
-	}
-	for i := range addrs {
-		bc.validatorCache.Remove("validator-snapshot-" + string(addrs[i].Bytes()))
-	}
-	return nil
-}
+// NOTE Use when needed but don't compile at all until then
+// func (bc *BlockChain) deleteValidatorSnapshots(addrs []common.Address) error {
+// 	batch := bc.db.NewBatch()
+// 	for i := range addrs {
+// 		rawdb.DeleteValidatorSnapshot(batch, addrs[i], bc.CurrentBlock().Epoch())
+// 	}
+// 	if err := batch.Write(); err != nil {
+// 		return err
+// 	}
+// 	for i := range addrs {
+// 		bc.validatorCache.Remove("validator-snapshot-" + string(addrs[i].Bytes()))
+// 	}
+// 	return nil
+// }
 
 // UpdateValidatorSnapshots updates the content snapshot of all validators
 // Note: this should only be called within the blockchain insert process.
@@ -2725,7 +2773,7 @@ func (bc *BlockChain) GetECDSAFromCoinbase(header *block.Header) (common.Address
 			return member.EcdsaAddress, nil
 		}
 
-		if utils.GetAddressFromBlsPubKeyBytes(member.BlsPublicKey[:]) == coinbase {
+		if utils.GetAddressFromBLSPubKeyBytes(member.BLSPublicKey[:]) == coinbase {
 			return member.EcdsaAddress, nil
 		}
 	}
