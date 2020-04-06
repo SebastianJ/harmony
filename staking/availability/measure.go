@@ -184,8 +184,7 @@ func ComputeCurrentSigning(
 		utils.Logger().Error().Msg("negative number of blocks to sign")
 	}
 
-	s1, s2 :=
-		numeric.NewDecFromBigInt(signed), numeric.NewDecFromBigInt(toSign)
+	s1, s2 := numeric.NewDecFromBigInt(signed), numeric.NewDecFromBigInt(toSign)
 	computed.Percentage = s1.Quo(s2)
 	computed.IsBelowThreshold = IsBelowSigningThreshold(computed.Percentage)
 	return computed
