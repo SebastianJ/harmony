@@ -138,7 +138,6 @@ type BlockChain struct {
 	pendingCrossLinksMutex      sync.RWMutex // pending crosslinks lock
 	pendingSlashingCandidatesMU sync.RWMutex // pending slashing candidates
 
-	checkpoint       int          // checkpoint counts towards the new checkpoint
 	currentBlock     atomic.Value // Current head of the block chain
 	currentFastBlock atomic.Value // Current head of the fast-sync chain (may be above the block chain!)
 
@@ -1590,26 +1589,6 @@ func (bc *BlockChain) InsertHeaderChain(chain []*block.Header, checkFreq int) (i
 	return bc.hc.InsertHeaderChain(chain, whFunc, start)
 }
 
-// writeHeader writes a header into the local chain, given that its parent is
-// already known. If the total difficulty of the newly inserted header becomes
-// greater than the current known TD, the canonical chain is re-routed.
-//
-// Note: This method is not concurrent-safe with inserting blocks simultaneously
-// into the chain, as side effects caused by reorganisations cannot be emulated
-// without the real blocks. Hence, writing headers directly should only be done
-// in two scenarios: pure-header mode of operation (light clients), or properly
-// separated header/block phases (non-archive clients).
-func (bc *BlockChain) writeHeader(header *block.Header) error {
-	bc.wg.Add(1)
-	defer bc.wg.Done()
-
-	bc.mu.Lock()
-	defer bc.mu.Unlock()
-
-	_, err := bc.hc.WriteHeader(header)
-	return err
-}
-
 // CurrentHeader retrieves the current head header of the canonical chain. The
 // header is retrieved from the HeaderChain's internal cache.
 func (bc *BlockChain) CurrentHeader() *block.Header {
@@ -2180,10 +2159,7 @@ func (bc *BlockChain) IsSpent(cxp *types.CXReceiptsProof) bool {
 	shardID := cxp.MerkleProof.ShardID
 	blockNum := cxp.MerkleProof.BlockNum.Uint64()
 	by, _ := rawdb.ReadCXReceiptsProofSpent(bc.db, shardID, blockNum)
-	if by == rawdb.SpentByte {
-		return true
-	}
-	return false
+	return by == rawdb.SpentByte
 }
 
 // ReadTxLookupEntry returns where the given transaction resides in the chain,
@@ -2229,7 +2205,8 @@ func (bc *BlockChain) ReadValidatorSnapshotAtEpoch(
 func (bc *BlockChain) ReadValidatorSnapshot(
 	addr common.Address,
 ) (*staking.ValidatorWrapper, error) {
-	if cached, ok := bc.validatorCache.Get("validator-snapshot-" + string(addr.Bytes())); ok {
+	epoch := bc.CurrentBlock().Epoch()
+	if cached, ok := bc.validatorCache.Get("validator-snapshot-" + string(addr.Bytes()) + epoch.String()); ok {
 		by := cached.([]byte)
 		v := staking.ValidatorWrapper{}
 		if err := rlp.DecodeBytes(by, &v); err != nil {
@@ -2238,7 +2215,7 @@ func (bc *BlockChain) ReadValidatorSnapshot(
 		return &v, nil
 	}
 
-	return rawdb.ReadValidatorSnapshot(bc.db, addr, bc.CurrentBlock().Epoch())
+	return rawdb.ReadValidatorSnapshot(bc.db, addr, epoch)
 }
 
 // writeValidatorSnapshots writes the snapshot of provided list of validators
@@ -2266,7 +2243,7 @@ func (bc *BlockChain) writeValidatorSnapshots(
 	for i := range validators {
 		by, err := rlp.EncodeToBytes(validators[i])
 		if err == nil {
-			key := "validator-snapshot-" + string(validators[i].Address.Bytes())
+			key := "validator-snapshot-" + string(validators[i].Address.Bytes()) + epoch.String()
 			bc.validatorCache.Add(key, by)
 		}
 	}
@@ -2286,9 +2263,9 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 	block *types.Block,
 	newEpochSuperCommittee, currentEpochSuperCommittee *shard.State,
 	state *state.DB,
-) error {
+) (map[common.Address]*staking.ValidatorStats, error) {
 	if newEpochSuperCommittee == nil {
-		return shard.ErrSuperCommitteeNil
+		return nil, shard.ErrSuperCommitteeNil
 	}
 
 	rosters, bootedFromSuperCommittee :=
@@ -2318,7 +2295,7 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 	for i := range newEpochSuperCommittee.Shards {
 		subCommittee := &newEpochSuperCommittee.Shards[i]
 		if newEpochSuperCommittee.Epoch == nil {
-			return errors.Wrapf(
+			return nil, errors.Wrapf(
 				errNilEpoch,
 				"block epoch %v current-committee-epoch %v",
 				block.Epoch(),
@@ -2327,13 +2304,13 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 		}
 		roster, err := votepower.Compute(subCommittee, newEpochSuperCommittee.Epoch)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rosters[i] = roster
 	}
 
+	validatorStats := map[common.Address]*staking.ValidatorStats{}
 	networkWide := votepower.AggregateRosters(rosters)
-
 	for key, value := range networkWide {
 		stats, err := rawdb.ReadValidatorStats(bc.db, key)
 		if err != nil {
@@ -2348,61 +2325,60 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 		for i := range value {
 			earningWrapping[i] = staking.VoteWithCurrentEpochEarning{
 				Vote:   value[i],
-				Earned: common.Big0,
+				Earned: big.NewInt(0),
 			}
 		}
 		stats.MetricsPerShard = earningWrapping
-		wrapper, err := state.ValidatorWrapper(key)
-		if err != nil {
-			return err
+
+		// This means it's already in staking epoch
+		if currentEpochSuperCommittee.Epoch != nil {
+			wrapper, err := state.ValidatorWrapper(key)
+			if err != nil {
+				return nil, err
+			}
+
+			aprComputed, err := apr.ComputeForValidator(
+				bc, block, wrapper,
+			)
+			if err == nil && aprComputed != nil {
+				a := *aprComputed
+				utils.Logger().Info().
+					Str("return-rate", a.String()).
+					Uint64("new-epoch", newEpochSuperCommittee.Epoch.Uint64()).
+					Msg("apr computed")
+				stats.APR = a
+			}
+
+			if err != nil {
+				utils.Logger().Debug().Err(err).Msg("issue with compute of apr")
+			}
+
+			snapshot, err := bc.ReadValidatorSnapshotAtEpoch(
+				currentEpochSuperCommittee.Epoch, wrapper.Address,
+			)
+
+			if err != nil {
+				return nil, err
+			}
+
+			computed := availability.ComputeCurrentSigning(snapshot, wrapper)
+
+			if _, wasBooted := bootedFromSuperCommittee[wrapper.Address]; wasBooted {
+				stats.BootedStatus = effective.LostEPoSAuction
+			}
+
+			if computed.IsBelowThreshold {
+				stats.BootedStatus = effective.InsufficientUptimeDuringEpoch
+			}
+
+			if slash.IsBanned(wrapper) {
+				stats.BootedStatus = effective.BannedForDoubleSigning
+			}
 		}
-
-		aprComputed, err := apr.ComputeForValidator(
-			bc, block, wrapper,
-		)
-		if err == nil && aprComputed != nil {
-			a := *aprComputed
-			utils.Logger().Info().
-				Str("return-rate", a.String()).
-				Uint64("new-epoch", newEpochSuperCommittee.Epoch.Uint64()).
-				Msg("apr computed")
-			stats.APR = a
-		}
-
-		if err != nil {
-			utils.Logger().Debug().Err(err).Msg("issue with compute of apr")
-		}
-
-		snapshot, err := bc.ReadValidatorSnapshotAtEpoch(
-			currentEpochSuperCommittee.Epoch, wrapper.Address,
-		)
-
-		if err != nil {
-			return err
-		}
-
-		computed := availability.ComputeCurrentSigning(snapshot, wrapper)
-
-		if _, wasBooted := bootedFromSuperCommittee[wrapper.Address]; wasBooted {
-			stats.BootedStatus = effective.LostEPoSAuction
-		}
-
-		if computed.IsBelowThreshold {
-			stats.BootedStatus = effective.InsufficientUptimeDuringEpoch
-		}
-
-		if slash.IsBanned(wrapper) {
-			stats.BootedStatus = effective.BannedForDoubleSigning
-		}
-
-		if err := rawdb.WriteValidatorStats(
-			batch, key, stats,
-		); err != nil {
-			return err
-		}
+		validatorStats[key] = stats
 	}
 
-	return nil
+	return validatorStats, nil
 }
 
 // deleteValidatorSnapshots deletes the snapshot staking information of given validator address
@@ -2425,7 +2401,7 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 // UpdateValidatorSnapshots updates the content snapshot of all validators
 // Note: this should only be called within the blockchain insert process.
 func (bc *BlockChain) UpdateValidatorSnapshots(
-	batch rawdb.DatabaseWriter, epoch *big.Int, state *state.DB,
+	batch rawdb.DatabaseWriter, epoch *big.Int, state *state.DB, newValidators []common.Address,
 ) error {
 	// Note this is reading the validator list from last block.
 	// It's fine since the new validators from this block is already snapshot when created.
@@ -2434,6 +2410,7 @@ func (bc *BlockChain) UpdateValidatorSnapshots(
 		return err
 	}
 
+	allValidators = append(allValidators, newValidators...)
 	// TODO: enable this once we allow validator to delete itself.
 	//err = bc.deleteValidatorSnapshots(allValidators)
 	//if err != nil {
@@ -2538,50 +2515,58 @@ func (bc *BlockChain) writeDelegationsByDelegator(
 // Note: this should only be called within the blockchain insert process.
 func (bc *BlockChain) UpdateStakingMetaData(
 	batch rawdb.DatabaseWriter, txns staking.StakingTransactions,
-	state *state.DB, epoch *big.Int,
-) error {
+	state *state.DB, epoch *big.Int, isNewEpoch bool,
+) (newValidators []common.Address, err error) {
 	newValidators, newDelegations, err := bc.prepareStakingMetaData(txns, state)
 	if err != nil {
 		utils.Logger().Warn().Msgf("oops, prepareStakingMetaData failed, err: %+v", err)
-		return err
+		return newValidators, err
 	}
 
 	if len(newValidators) > 0 {
 		list, err := bc.ReadValidatorList()
 		if err != nil {
-			return err
+			return newValidators, err
 		}
 
 		for _, addr := range newValidators {
 			newList, appended := utils.AppendIfMissing(list, addr)
 			if !appended {
-				return errValidatorExist
+				return newValidators, errValidatorExist
 			}
 			list = newList
 
 			// Update validator snapshot for the new validator
 			validator, err := state.ValidatorWrapper(addr)
 			if err != nil {
-				return err
+				return newValidators, err
 			}
 
 			if err := rawdb.WriteValidatorSnapshot(batch, validator, epoch); err != nil {
-				return err
+				return newValidators, err
+			}
+			// For validator created at exactly the last block of an epoch, we should create the snapshot
+			// for next epoch too.
+			if isNewEpoch {
+				newEpoch := new(big.Int).Add(epoch, common.Big1)
+				if err := rawdb.WriteValidatorSnapshot(batch, validator, newEpoch); err != nil {
+					return newValidators, err
+				}
 			}
 		}
 
 		// Update validator list
 		if err = bc.WriteValidatorList(batch, list); err != nil {
-			return err
+			return newValidators, err
 		}
 	}
 
 	for addr, delegations := range newDelegations {
 		if err := bc.writeDelegationsByDelegator(batch, addr, delegations); err != nil {
-			return err
+			return newValidators, err
 		}
 	}
-	return nil
+	return newValidators, nil
 }
 
 // prepareStakingMetaData prepare the updates of validator's
@@ -2705,7 +2690,7 @@ func (bc *BlockChain) addDelegationIndex(
 	// If there is an existing delegation, just return
 	validatorAddressBytes := validatorAddress.Bytes()
 	for _, delegation := range delegations {
-		if bytes.Compare(delegation.ValidatorAddress.Bytes(), validatorAddressBytes) == 0 {
+		if bytes.Equal(delegation.ValidatorAddress[:], validatorAddressBytes[:]) {
 			return delegations, nil
 		}
 	}
@@ -2717,7 +2702,9 @@ func (bc *BlockChain) addDelegationIndex(
 		return delegations, err
 	}
 	for i := range wrapper.Delegations {
-		if bytes.Compare(wrapper.Delegations[i].DelegatorAddress.Bytes(), delegatorAddress.Bytes()) == 0 {
+		if bytes.Equal(
+			wrapper.Delegations[i].DelegatorAddress[:], delegatorAddress[:],
+		) {
 			// TODO(audit): change the way of indexing if we allow delegation deletion.
 			delegations = append(delegations, staking.DelegationIndex{
 				validatorAddress,
@@ -2769,7 +2756,7 @@ func (bc *BlockChain) GetECDSAFromCoinbase(header *block.Header) (common.Address
 	}
 	for _, member := range committee.Slots {
 		// After staking the coinbase address will be the address of bls public key
-		if bytes.Compare(member.EcdsaAddress[:], coinbase[:]) == 0 {
+		if bytes.Equal(member.EcdsaAddress[:], coinbase[:]) {
 			return member.EcdsaAddress, nil
 		}
 
