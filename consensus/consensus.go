@@ -2,7 +2,6 @@ package consensus
 
 import (
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 
@@ -129,8 +128,6 @@ type Consensus struct {
 	syncNotReadyChan chan struct{}
 	// If true, this consensus will not propose view change.
 	disableViewChange bool
-	// last node block reward for metrics
-	lastBlockReward *big.Int
 	// Have a dedicated reader thread pull from this chan, like in node
 	SlashChan chan slash.Record
 	// only during testing
@@ -167,11 +164,6 @@ func (consensus *Consensus) BlocksNotSynchronized() {
 // VdfSeedSize returns the number of VRFs for VDF computation
 func (consensus *Consensus) VdfSeedSize() int {
 	return int(consensus.Decider.ParticipantsCount()) * 2 / 3
-}
-
-// GetBlockReward returns last node block reward
-func (consensus *Consensus) GetBlockReward() *big.Int {
-	return consensus.lastBlockReward
 }
 
 // GetLeaderPrivateKey returns leader private key if node is the leader
@@ -231,7 +223,6 @@ func New(
 	consensus.SlashChan = make(chan slash.Record)
 	consensus.commitFinishChan = make(chan uint64)
 	consensus.ReadySignal = make(chan struct{})
-	consensus.lastBlockReward = common.Big0
 	// channel for receiving newly generated VDF
 	consensus.RndChannel = make(chan [vdfAndSeedSize]byte)
 	return &consensus, nil
