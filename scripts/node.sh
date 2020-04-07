@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-version="v1 20200327.0"
+version="v1 20200407.0"
 
 unset -v progname
 progname="${0##*/}"
@@ -56,6 +56,7 @@ function check_root
    if [[ $EUID -ne 0 ]]; then
       msg "this script must be run as root to setup environment"
       msg please use \"sudo ${progname}\"
+      msg "you may use -S option to run as normal user"
       exit 1
    fi
 }
@@ -107,10 +108,8 @@ options:
    -p passfile    use the given BLS passphrase file
    -d             just download the Harmony binaries (default: off)
    -D             do not download Harmony binaries (default: download when start)
-   -m             collect and upload node metrics to harmony prometheus + grafana
    -N network     join the given network (mainnet, testnet, staking, partner, stress, devnet; default: mainnet)
    -n port        specify the public base port of the node (default: 9000)
-   -t             equivalent to -N testnet (deprecated)
    -T nodetype    specify the node type (validator, explorer; default: validator)
    -i shardid     specify the shard id (valid only with explorer node; default: 1)
    -b             download harmony_db files from shard specified by -i <shardid> (default: off)
@@ -179,14 +178,13 @@ usage() {
 BUCKET=pub.harmony.one
 OS=$(uname -s)
 
-unset start_clean loop run_as_root blspass do_not_download download_only metrics network node_type shard_id download_harmony_db db_file_to_dl
+unset start_clean loop run_as_root blspass do_not_download download_only network node_type shard_id download_harmony_db db_file_to_dl
 unset upgrade_rel public_rpc staking_mode pub_port multi_key blsfolder blacklist verify TRACEFILE
 start_clean=false
 loop=true
 run_as_root=true
 do_not_download=false
 download_only=false
-metrics=false
 network=mainnet
 node_type=validator
 shard_id=-1
@@ -205,7 +203,7 @@ ${TRACEFILE=}
 
 unset OPTIND OPTARG opt
 OPTIND=1
-while getopts :1chk:sSp:dDmN:tT:i:ba:U:PvVyzn:MAIB:r:Y:f:R: opt
+while getopts :1chk:sSp:dDN:T:i:ba:U:PvVyzn:MAIB:r:Y:f:R: opt
 do
    case "${opt}" in
    '?') usage "unrecognized option -${OPTARG}";;
@@ -222,10 +220,8 @@ do
    D) do_not_download=true;;
    M) multi_key=true;;
    f) blsfolder="${OPTARG}";;
-   m) metrics=true;;
    N) network="${OPTARG}";;
    n) pub_port="${OPTARG}";;
-   t) network=devnet;;
    T) node_type="${OPTARG}";;
    i) shard_id="${OPTARG}";;
    I) static=true;;
@@ -248,7 +244,7 @@ do
 done
 shift $((${OPTIND} - 1))
 
-unset -v bootnodes REL network_type dns_zone
+unset -v bootnodes REL network_type dns_zone syncdir
 
 case "${node_type}" in
 validator) ;;
@@ -268,6 +264,7 @@ mainnet)
   REL=mainnet
   network_type=mainnet
   dns_zone=t.hmny.io
+  syncdir=mainnet.min
   ;;
 testnet)  # TODO: update Testnet configs once LRTN is upgraded
   bootnodes=(
@@ -277,6 +274,7 @@ testnet)  # TODO: update Testnet configs once LRTN is upgraded
   REL=testnet
   network_type=testnet
   dns_zone=p.hmny.io
+  syncdir=lrtn
   ;;
 staking)
   bootnodes=(
@@ -286,6 +284,7 @@ staking)
   REL=pangaea
   network_type=pangaea
   dns_zone=os.hmny.io
+  syncdir=ostn
   ;;
 partner)
   bootnodes=(
@@ -295,6 +294,7 @@ partner)
   REL=partner
   network_type=partner
   dns_zone=ps.hmny.io
+  syncdir=pstn
   ;;
 stress)
   bootnodes=(
@@ -303,6 +303,7 @@ stress)
   REL=stressnet
   network_type=stressnet
   dns_zone=stn.hmny.io
+  syncdir=stn
   ;;
 devnet)
   bootnodes=(
@@ -312,6 +313,7 @@ devnet)
   REL=devnet
   network_type=devnet
   dns_zone=pga.hmny.io
+  syncdir=devnet
   ;;
 *)
   err 64 "${network}: invalid network"
@@ -595,7 +597,6 @@ fi
 
 NODE_PORT=${pub_port:-9000}
 PUB_IP=
-METRICS=
 PUSHGATEWAY_IP=
 PUSHGATEWAY_PORT=
 
@@ -631,6 +632,24 @@ then
       mv -f harmony_db_* latest .dht* "${backup_dir}/" 2>/dev/null || :
       rm -rf latest
    fi
+
+   # do rclone sync
+   if ! which rclone > /dev/null; then
+      msg "installing rclone to fast sync db"
+      msg "curl https://rclone.org/install.sh | sudo bash"
+      curl https://rclone.org/install.sh | sudo bash
+      mkdir -p ~/.config/rclone
+      cat<<-EOT>~/.config/rclone/rclone.conf
+[hmy]
+type = s3
+provider = AWS
+env_auth = false
+region = us-west-1
+acl = public-read
+EOT
+   fi
+   msg "Syncing harmony_db_0"
+   rclone sync -P hmy://pub.harmony.one/$syncdir/harmony_db_0 harmony_db_0
 fi
 mkdir -p latest
 
@@ -853,15 +872,6 @@ do
       args+=(
       -node_type="${node_type}"
       -shard_id="${shard_id}"
-      )
-      ;;
-   esac
-   case "${metrics}" in
-   true)
-      args+=(
-         -metrics "${metrics}"
-         -pushgateway_ip "${PUSHGATEWAY_IP}"
-         -pushgateway_port "${PUSHGATEWAY_PORT}"
       )
       ;;
    esac
