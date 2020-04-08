@@ -90,8 +90,6 @@ type Consensus struct {
 	block []byte
 	// BlockHeader to run consensus on
 	blockHeader []byte
-	// Array of block hashes.
-	blockHashes [][32]byte
 	// Shard Id which this node belongs to
 	ShardID uint32
 	// whether to ignore viewID check
@@ -130,22 +128,16 @@ type Consensus struct {
 	disableViewChange bool
 	// Have a dedicated reader thread pull from this chan, like in node
 	SlashChan chan slash.Record
+	// How long in second the leader needs to wait to propose a new block.
+	BlockPeriod time.Duration
+	// The time due for next block proposal
+	NextBlockDue time.Time
 }
 
 // SetCommitDelay sets the commit message delay.  If set to non-zero,
 // validator delays commit message by the amount.
 func (consensus *Consensus) SetCommitDelay(delay time.Duration) {
 	consensus.delayCommit = delay
-}
-
-// DisableViewChangeForTestingOnly makes the receiver not propose view
-// changes when it should, e.g. leader timeout.
-//
-// As the name implies, this is intended for testing only,
-// and should not be used on production network.
-// This is also not part of the long-term consensus API and may go away later.
-func (consensus *Consensus) DisableViewChangeForTestingOnly() {
-	consensus.disableViewChange = true
 }
 
 // BlocksSynchronized lets the main loop know that block synchronization finished
