@@ -1888,10 +1888,6 @@ func (bc *BlockChain) ReadCrossLink(shardID uint32, blockNum uint64) (*types.Cro
 // any previous block's crosslink is received up to this point
 // there is no missing hole between genesis to this crosslink of given shardID
 func (bc *BlockChain) LastContinuousCrossLink(batch rawdb.DatabaseWriter, shardID uint32) error {
-	if !bc.Config().IsCrossLink(bc.CurrentBlock().Epoch()) {
-		return errors.New("Trying to write last continuous cross link with epoch before cross link starting epoch")
-	}
-
 	oldLink, err := bc.ReadShardLastCrossLink(shardID)
 	if oldLink == nil || err != nil {
 		return err
@@ -1963,7 +1959,6 @@ func (bc *BlockChain) ReadPendingCrossLinks() ([]types.CrossLink, error) {
 	} else {
 		bytes, err := rawdb.ReadPendingCrossLinks(bc.db)
 		if err != nil || len(bytes) == 0 {
-			utils.Logger().Info().Err(err).Int("dataLen", len(bytes)).Msg("ReadPendingCrossLinks")
 			return nil, err
 		}
 	}
@@ -2336,24 +2331,21 @@ func (bc *BlockChain) UpdateValidatorVotingPower(
 				return nil, err
 			}
 
-			aprComputed, err := apr.ComputeForValidator(
-				bc, block, wrapper,
-			)
-			if err == nil && aprComputed != nil {
-				a := *aprComputed
-				utils.Logger().Info().
-					Str("return-rate", a.String()).
-					Uint64("new-epoch", newEpochSuperCommittee.Epoch.Uint64()).
-					Msg("apr computed")
-				stats.APR = a
-			}
-
-			if err != nil {
-				utils.Logger().Debug().Err(err).Msg("issue with compute of apr")
-			}
-
-			if err != nil {
-				return nil, err
+			stats.APR = numeric.ZeroDec()
+			if wrapper.Delegations[0].Amount.Cmp(common.Big0) > 0 {
+				if aprComputed, err := apr.ComputeForValidator(
+					bc, block, wrapper,
+				); err != nil {
+					if errors.Cause(err) == apr.ErrInsufficientEpoch {
+						utils.Logger().Info().Err(err).Msg("apr could not be computed")
+					} else {
+						return nil, err
+					}
+				} else {
+					stats.APR = *aprComputed
+				}
+			} else {
+				utils.Logger().Info().Msg("zero total delegation, skipping apr computation")
 			}
 
 			if _, wasBooted := bootedFromSuperCommittee[wrapper.Address]; wasBooted {

@@ -146,8 +146,6 @@ func (r *GroupReceiverImpl) Receive(ctx context.Context) (
 		sender = libp2p_peer.ID(m.From)
 	}
 
-	utils.Logger().Info().Int("size", len(msg)).Msg("receive p2p message")
-
 	return msg, sender, err
 }
 
@@ -156,7 +154,8 @@ func (r *GroupReceiverImpl) Receive(ctx context.Context) (
 func (host *HostV2) GroupReceiver(group nodeconfig.GroupID) (
 	receiver p2p.GroupReceiver, err error,
 ) {
-	t, err := host.getTopic(string(group))
+	top := string(group)
+	t, err := host.getTopic(top)
 	if err != nil {
 		return nil, err
 	}
