@@ -173,11 +173,11 @@ var DefaultTxPoolConfig = TxPoolConfig{
 
 	PriceLimit: 1,
 	PriceBump:  10,
-
-	AccountSlots: 16,
-	GlobalSlots:  4096,
-	AccountQueue: 64,
-	GlobalQueue:  1024,
+	//100x everything:
+	AccountSlots: 1600,
+	GlobalSlots:  409600,
+	AccountQueue: 6400,
+	GlobalQueue:  102400,
 
 	Lifetime: 30 * time.Minute,
 
@@ -679,21 +679,21 @@ func (pool *TxPool) validateTx(tx types.PoolTransaction, local bool) error {
 		return ErrInvalidSender
 	}
 	// Make sure transaction does not have blacklisted addresses
-	if _, exists := (pool.config.Blacklist)[from]; exists {
+	/*if _, exists := (pool.config.Blacklist)[from]; exists {
 		if b32, err := hmyCommon.AddressToBech32(from); err == nil {
 			return errors.WithMessagef(ErrBlacklistFrom, "transaction sender is %s", b32)
 		}
 		return ErrBlacklistFrom
-	}
+	}*/
 	// Make sure transaction does not burn funds by sending funds to blacklisted address
-	if tx.To() != nil {
+	/*if tx.To() != nil {
 		if _, exists := (pool.config.Blacklist)[*tx.To()]; exists {
 			if b32, err := hmyCommon.AddressToBech32(*tx.To()); err == nil {
 				return errors.WithMessagef(ErrBlacklistTo, "transaction receiver is %s", b32)
 			}
 			return ErrBlacklistTo
 		}
-	}
+	}*/
 	// Drop non-local transactions under our own minimal accepted gas price
 	local = local || pool.locals.contains(from) // account may be local even if the transaction arrived from the network
 	if !local && pool.gasPrice.Cmp(tx.GasPrice()) > 0 {
