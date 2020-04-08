@@ -22,7 +22,9 @@ func TestPopulateMessageFields(t *testing.T) {
 		t.Fatalf("newhost failure: %v", err)
 	}
 	blsPriKey := bls.RandPrivateKey()
-	decider := quorum.NewDecider(quorum.SuperMajorityVote)
+	decider := quorum.NewDecider(
+		quorum.SuperMajorityVote, shard.BeaconChainShardID,
+	)
 	consensus, err := New(
 		host, shard.BeaconChainShardID, leader, multibls.GetPrivateKey(blsPriKey), decider,
 	)
@@ -48,7 +50,7 @@ func TestPopulateMessageFields(t *testing.T) {
 	if !bytes.Equal(consensusMsg.BlockHash[:], blockHash[:]) {
 		t.Errorf("Block hash is not populated correctly")
 	}
-	if bytes.Compare(consensusMsg.SenderPubkey, blsPriKey.GetPublicKey().Serialize()) != 0 {
+	if !bytes.Equal(consensusMsg.SenderPubkey, blsPriKey.GetPublicKey().Serialize()) {
 		t.Errorf("Sender ID is not populated correctly")
 	}
 }
@@ -60,7 +62,7 @@ func TestSignAndMarshalConsensusMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newhost failure: %v", err)
 	}
-	decider := quorum.NewDecider(quorum.SuperMajorityVote)
+	decider := quorum.NewDecider(quorum.SuperMajorityVote, shard.BeaconChainShardID)
 	blsPriKey := bls.RandPrivateKey()
 	consensus, err := New(
 		host, shard.BeaconChainShardID, leader, multibls.GetPrivateKey(blsPriKey), decider,
@@ -89,7 +91,9 @@ func TestSetViewID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newhost failure: %v", err)
 	}
-	decider := quorum.NewDecider(quorum.SuperMajorityVote)
+	decider := quorum.NewDecider(
+		quorum.SuperMajorityVote, shard.BeaconChainShardID,
+	)
 	blsPriKey := bls.RandPrivateKey()
 	consensus, err := New(
 		host, shard.BeaconChainShardID, leader, multibls.GetPrivateKey(blsPriKey), decider,

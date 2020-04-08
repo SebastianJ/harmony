@@ -46,7 +46,7 @@ func (s *PublicHarmonyAPI) GasPrice(ctx context.Context) (*big.Int, error) {
 
 // NodeMetadata captures select metadata of the RPC answering node
 type NodeMetadata struct {
-	BLSPublicKey   string             `json:"blskey"`
+	BLSPublicKey   []string           `json:"blskey"`
 	Version        string             `json:"version"`
 	NetworkType    string             `json:"network"`
 	ChainConfig    params.ChainConfig `json:"chain-config"`
@@ -55,6 +55,8 @@ type NodeMetadata struct {
 	CurrentEpoch   uint64             `json:"current-epoch"`
 	BlocksPerEpoch *uint64            `json:"blocks-per-epoch,omitempty"`
 	Role           string             `json:"role"`
+	DNSZone        string             `json:"dns-zone"`
+	Archival       bool               `json:"is-archival"`
 }
 
 // GetNodeMetadata produces a NodeMetadata record, data is from the answering RPC node
@@ -69,8 +71,15 @@ func (s *PublicHarmonyAPI) GetNodeMetadata() NodeMetadata {
 		blockEpoch = &b
 	}
 
+	blsKeys := []string{}
+	if cfg.ConsensusPubKey != nil {
+		for _, key := range cfg.ConsensusPubKey.PublicKey {
+			blsKeys = append(blsKeys, key.SerializeToHexStr())
+		}
+	}
+
 	return NodeMetadata{
-		cfg.ConsensusPubKey.SerializeToHexStr(),
+		blsKeys,
 		nodeconfig.GetVersion(),
 		string(cfg.GetNetworkType()),
 		*s.b.ChainConfig(),
@@ -79,5 +88,7 @@ func (s *PublicHarmonyAPI) GetNodeMetadata() NodeMetadata {
 		header.Epoch().Uint64(),
 		blockEpoch,
 		cfg.Role().String(),
+		cfg.DNSZone,
+		cfg.GetArchival(),
 	}
 }

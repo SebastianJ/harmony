@@ -2,6 +2,7 @@ package quorum
 
 import (
 	"encoding/json"
+	"math/big"
 
 	"github.com/harmony-one/harmony/consensus/votepower"
 	bls_cosi "github.com/harmony-one/harmony/crypto/bls"
@@ -13,9 +14,8 @@ import (
 )
 
 var (
-	twoThird      = numeric.NewDec(2).Quo(numeric.NewDec(3))
-	ninetyPercent = numeric.MustNewDecFromStr("0.90")
-	totalShare    = numeric.MustNewDecFromStr("1.00")
+	twoThird   = numeric.NewDec(2).Quo(numeric.NewDec(3))
+	totalShare = numeric.MustNewDecFromStr("1.00")
 )
 
 // TallyResult is the result of when we calculate voting power,
@@ -26,7 +26,7 @@ type TallyResult struct {
 }
 
 type voteBox struct {
-	voters       map[shard.BlsPublicKey]struct{}
+	voters       map[shard.BLSPublicKey]struct{}
 	currentTotal numeric.Dec
 }
 
@@ -80,7 +80,7 @@ func (v *stakedVoteWeight) IsQuorumAchievedByMask(mask *bls_cosi.Mask) bool {
 	return (*currentTotalPower).GT(threshold)
 }
 func (v *stakedVoteWeight) computeCurrentTotalPower(p Phase) (*numeric.Dec, error) {
-	w := shard.BlsPublicKey{}
+	w := shard.BLSPublicKey{}
 	members := v.Participants()
 	ballot := func() *voteBox {
 		switch p {
@@ -97,15 +97,13 @@ func (v *stakedVoteWeight) computeCurrentTotalPower(p Phase) (*numeric.Dec, erro
 	}()
 
 	for i := range members {
-		w.FromLibBLSPublicKey(members[i])
+		if err := w.FromLibBLSPublicKey(members[i]); err != nil {
+			return nil, err
+		}
 		if _, didVote := ballot.voters[w]; !didVote &&
 			v.ReadBallot(p, members[i]) != nil {
-			err := w.FromLibBLSPublicKey(members[i])
-			if err != nil {
-				return nil, err
-			}
 			ballot.currentTotal = ballot.currentTotal.Add(
-				v.roster.Voters[w].EffectivePercent,
+				v.roster.Voters[w].OverallPercent,
 			)
 			ballot.voters[w] = struct{}{}
 		}
@@ -117,17 +115,16 @@ func (v *stakedVoteWeight) computeCurrentTotalPower(p Phase) (*numeric.Dec, erro
 // ComputeTotalPowerByMask computes the total power indicated by bitmap mask
 func (v *stakedVoteWeight) computeTotalPowerByMask(mask *bls_cosi.Mask) *numeric.Dec {
 	pubKeys := mask.Publics
-	w := shard.BlsPublicKey{}
+	w := shard.BLSPublicKey{}
 	currentTotal := numeric.ZeroDec()
 
 	for i := range pubKeys {
-		err := w.FromLibBLSPublicKey(pubKeys[i])
-		if err != nil {
+		if err := w.FromLibBLSPublicKey(pubKeys[i]); err != nil {
 			return nil
 		}
 		if enabled, err := mask.KeyEnabled(pubKeys[i]); err == nil && enabled {
 			currentTotal = currentTotal.Add(
-				v.roster.Voters[w].EffectivePercent,
+				v.roster.Voters[w].OverallPercent,
 			)
 		}
 	}
@@ -139,16 +136,9 @@ func (v *stakedVoteWeight) QuorumThreshold() numeric.Dec {
 	return twoThird
 }
 
-// RewardThreshold ..
-func (v *stakedVoteWeight) IsRewardThresholdAchieved() bool {
-	reached, err := v.computeCurrentTotalPower(Commit)
-	if err != nil {
-		utils.Logger().Error().
-			AnErr("bls error", err).
-			Msg("Failure in attempt bls-key reading")
-		return false
-	}
-	return reached.GTE(ninetyPercent)
+// IsAllSigsCollected ..
+func (v *stakedVoteWeight) IsAllSigsCollected() bool {
+	return v.SignersCount(Commit) == v.ParticipantsCount()
 }
 
 var (
@@ -159,12 +149,12 @@ var (
 )
 
 func (v *stakedVoteWeight) SetVoters(
-	staked shard.SlotList,
+	subCommittee *shard.Committee, epoch *big.Int,
 ) (*TallyResult, error) {
 	v.ResetPrepareAndCommitVotes()
 	v.ResetViewChangeVotes()
 
-	roster, err := votepower.Compute(staked)
+	roster, err := votepower.Compute(subCommittee, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +171,8 @@ func (v *stakedVoteWeight) String() string {
 	return string(s)
 }
 
+// TODO remove this large method, use roster's own Marshal, mix it
+// specific logic here
 func (v *stakedVoteWeight) MarshalJSON() ([]byte, error) {
 	voterCount := len(v.roster.Voters)
 	type u struct {
@@ -193,8 +185,9 @@ func (v *stakedVoteWeight) MarshalJSON() ([]byte, error) {
 	}
 
 	type t struct {
-		Policy            string `json"policy"`
+		Policy            string `json:"policy"`
 		Count             int    `json:"count"`
+		Externals         int    `json:"external-validator-slot-count"`
 		Participants      []u    `json:"committee-members"`
 		HmyVotingPower    string `json:"hmy-voting-power"`
 		StakedVotingPower string `json:"staked-voting-power"`
@@ -202,18 +195,19 @@ func (v *stakedVoteWeight) MarshalJSON() ([]byte, error) {
 	}
 
 	parts := make([]u, voterCount)
-	i := 0
+	i, externalCount := 0, 0
 
 	for identity, voter := range v.roster.Voters {
 		member := u{
 			voter.IsHarmonyNode,
 			common2.MustAddressToBech32(voter.EarningAccount),
 			identity.Hex(),
-			voter.RawPercent.String(),
-			voter.EffectivePercent.String(),
+			voter.GroupPercent.String(),
+			voter.OverallPercent.String(),
 			"",
 		}
 		if !voter.IsHarmonyNode {
+			externalCount++
 			member.EffectiveStake = voter.EffectiveStake.String()
 		}
 		parts[i] = member
@@ -223,10 +217,11 @@ func (v *stakedVoteWeight) MarshalJSON() ([]byte, error) {
 	return json.Marshal(t{
 		v.Policy().String(),
 		voterCount,
+		externalCount,
 		parts,
 		v.roster.OurVotingPowerTotalPercentage.String(),
 		v.roster.TheirVotingPowerTotalPercentage.String(),
-		v.roster.RawStakedTotal.String(),
+		v.roster.TotalEffectiveStake.String(),
 	})
 }
 
@@ -237,7 +232,7 @@ func (v *stakedVoteWeight) AmIMemberOfCommitee() bool {
 	}
 	identity, _ := pubKeyFunc()
 	for _, key := range identity.PublicKey {
-		if w := (shard.BlsPublicKey{}); w.FromLibBLSPublicKey(key) != nil {
+		if w := (shard.BLSPublicKey{}); w.FromLibBLSPublicKey(key) != nil {
 			_, ok := v.roster.Voters[w]
 			if ok {
 				return true
@@ -248,7 +243,7 @@ func (v *stakedVoteWeight) AmIMemberOfCommitee() bool {
 }
 
 func newBox() *voteBox {
-	return &voteBox{map[shard.BlsPublicKey]struct{}{}, numeric.ZeroDec()}
+	return &voteBox{map[shard.BLSPublicKey]struct{}{}, numeric.ZeroDec()}
 }
 
 func newBallotBox() box {

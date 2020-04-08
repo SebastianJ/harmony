@@ -166,7 +166,7 @@ func (sc *SyncConfig) FindPeerByHash(peerHash []byte) *SyncPeerConfig {
 	sc.mtx.RLock()
 	defer sc.mtx.RUnlock()
 	for _, pc := range sc.peers {
-		if bytes.Compare(pc.peerHash, peerHash) == 0 {
+		if bytes.Equal(pc.peerHash, peerHash) {
 			return pc
 		}
 	}
@@ -493,7 +493,7 @@ func (ss *StateSync) getMaxConsensusBlockFromParentHash(parentHash common.Hash) 
 	ss.syncConfig.ForEachPeer(func(peerConfig *SyncPeerConfig) (brk bool) {
 		for _, block := range peerConfig.newBlocks {
 			ph := block.ParentHash()
-			if bytes.Compare(ph[:], parentHash[:]) == 0 {
+			if bytes.Equal(ph[:], parentHash[:]) {
 				candidateBlocks = append(candidateBlocks, block)
 				break
 			}
@@ -521,7 +521,7 @@ func (ss *StateSync) getMaxConsensusBlockFromParentHash(parentHash common.Hash) 
 func (ss *StateSync) getBlockFromOldBlocksByParentHash(parentHash common.Hash) *types.Block {
 	for _, block := range ss.commonBlocks {
 		ph := block.ParentHash()
-		if bytes.Compare(ph[:], parentHash[:]) == 0 {
+		if bytes.Equal(ph[:], parentHash[:]) {
 			return block
 		}
 	}
@@ -531,7 +531,7 @@ func (ss *StateSync) getBlockFromOldBlocksByParentHash(parentHash common.Hash) *
 func (ss *StateSync) getBlockFromLastMileBlocksByParentHash(parentHash common.Hash) *types.Block {
 	for _, block := range ss.lastMileBlocks {
 		ph := block.ParentHash()
-		if bytes.Compare(ph[:], parentHash[:]) == 0 {
+		if bytes.Equal(ph[:], parentHash[:]) {
 			return block
 		}
 	}
@@ -590,6 +590,7 @@ func (ss *StateSync) UpdateBlockAndStatus(block *types.Block, bc *core.BlockChai
 		Uint64("blockHeight", block.NumberU64()).
 		Uint64("blockEpoch", block.Epoch().Uint64()).
 		Str("blockHex", block.Hash().Hex()).
+		Uint32("ShardID", block.ShardID()).
 		Msg("[SYNC] UpdateBlockAndStatus: new block added to blockchain")
 	for i, tx := range block.StakingTransactions() {
 		utils.Logger().Info().
@@ -773,40 +774,33 @@ func (ss *StateSync) SyncLoop(bc *core.BlockChain, worker *worker.Worker, isBeac
 	// remove SyncLoopFrequency
 	ticker := time.NewTicker(SyncLoopFrequency * time.Second)
 	defer ticker.Stop()
-Loop:
-	for {
-		select {
-		case <-ticker.C:
-			otherHeight := ss.getMaxPeerHeight(isBeacon)
-			currentHeight := bc.CurrentBlock().NumberU64()
+	for range ticker.C {
+		otherHeight := ss.getMaxPeerHeight(isBeacon)
+		currentHeight := bc.CurrentBlock().NumberU64()
+		if currentHeight >= otherHeight {
+			utils.Logger().Info().
+				Msgf("[SYNC] Node is now IN SYNC! (isBeacon: %t, ShardID: %d, otherHeight: %d, currentHeight: %d)",
+					isBeacon, bc.ShardID(), otherHeight, currentHeight)
+			return
+		}
+		utils.Logger().Debug().
+			Msgf("[SYNC] Node is OUT OF SYNC (isBeacon: %t, ShardID: %d, otherHeight: %d, currentHeight: %d)",
+				isBeacon, bc.ShardID(), otherHeight, currentHeight)
 
-			if currentHeight >= otherHeight {
-				utils.Logger().Info().
-					Msgf("[SYNC] Node is now IN SYNC! (isBeacon: %t, ShardID: %d, otherHeight: %d, currentHeight: %d)",
-						isBeacon, bc.ShardID(), otherHeight, currentHeight)
-				break Loop
-			} else {
-				utils.Logger().Debug().
-					Msgf("[SYNC] Node is Not in Sync (isBeacon: %t, ShardID: %d, otherHeight: %d, currentHeight: %d)",
-						isBeacon, bc.ShardID(), otherHeight, currentHeight)
-			}
-			startHash := bc.CurrentBlock().Hash()
-			size := uint32(otherHeight - currentHeight)
-			if size > SyncLoopBatchSize {
-				size = SyncLoopBatchSize
-			}
-			err := ss.ProcessStateSync(startHash[:], size, bc, worker)
-			if err != nil {
-				utils.Logger().Error().Err(err).
-					Msgf("[SYNC] ProcessStateSync failed (isBeacon: %t, ShardID: %d, otherHeight: %d, currentHeight: %d)",
-						isBeacon, bc.ShardID(), otherHeight, currentHeight)
-				// should we still call UpdateConsensusInformation() upon state sync failure?
-				// how to handle error here?
-			}
-			ss.purgeOldBlocksFromCache()
-			if consensus != nil {
-				consensus.UpdateConsensusInformation()
-			}
+		startHash := bc.CurrentBlock().Hash()
+		size := uint32(otherHeight - currentHeight)
+		if size > SyncLoopBatchSize {
+			size = SyncLoopBatchSize
+		}
+		err := ss.ProcessStateSync(startHash[:], size, bc, worker)
+		if err != nil {
+			utils.Logger().Error().Err(err).
+				Msgf("[SYNC] ProcessStateSync failed (isBeacon: %t, ShardID: %d, otherHeight: %d, currentHeight: %d)",
+					isBeacon, bc.ShardID(), otherHeight, currentHeight)
+		}
+		ss.purgeOldBlocksFromCache()
+		if consensus != nil {
+			consensus.SetMode(consensus.UpdateConsensusInformation())
 		}
 	}
 	ss.purgeAllBlocksFromCache()

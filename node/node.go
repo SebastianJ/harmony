@@ -7,23 +7,18 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/harmony-one/harmony/accounts"
 	"github.com/harmony-one/harmony/api/client"
-	clientService "github.com/harmony-one/harmony/api/client/service"
 	msg_pb "github.com/harmony-one/harmony/api/proto/message"
 	proto_node "github.com/harmony-one/harmony/api/proto/node"
 	"github.com/harmony-one/harmony/api/service"
 	"github.com/harmony-one/harmony/api/service/syncing"
 	"github.com/harmony-one/harmony/api/service/syncing/downloader"
 	"github.com/harmony-one/harmony/consensus"
-	"github.com/harmony-one/harmony/consensus/reward"
 	"github.com/harmony-one/harmony/core"
 	"github.com/harmony-one/harmony/core/rawdb"
 	"github.com/harmony-one/harmony/core/types"
-	"github.com/harmony-one/harmony/drand"
 	"github.com/harmony-one/harmony/internal/chain"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
 	"github.com/harmony-one/harmony/internal/ctxerror"
@@ -111,7 +106,6 @@ type Node struct {
 	BlockChannel          chan *types.Block    // The channel to send newly proposed blocks
 	ConfirmedBlockChannel chan *types.Block    // The channel to send confirmed blocks
 	BeaconBlockChannel    chan *types.Block    // The channel to send beacon blocks for non-beaconchain nodes
-	DRand                 *drand.DRand         // The instance for distributed randomness protocol
 
 	pendingCXReceipts map[string]*types.CXReceiptsProof // All the receipts received but not yet processed for Consensus
 	pendingCXMutex    sync.Mutex
@@ -136,17 +130,14 @@ type Node struct {
 
 	CxPool *core.CxPool // pool for missing cross shard receipts resend
 
-	Worker       *worker.Worker
-	BeaconWorker *worker.Worker // worker for beacon chain
-
-	// Client server (for wallet requests)
-	clientServer *clientService.Server
+	Worker, BeaconWorker *worker.Worker
+	downloaderServer     *downloader.Server
 
 	// Syncing component.
-	syncID                 [SyncIDLength]byte // a unique ID for the node during the state syncing process with peers
-	downloaderServer       *downloader.Server
-	stateSync              *syncing.StateSync
-	beaconSync             *syncing.StateSync
+	syncID [SyncIDLength]byte // a unique ID for the node during the state syncing process with peers
+
+	stateSync, beaconSync *syncing.StateSync
+
 	peerRegistrationRecord map[string]*syncConfig // record registration time (unixtime) of peers begin in syncing
 	SyncingPeerProvider    SyncingPeerProvider
 
@@ -158,64 +149,34 @@ type Node struct {
 	host p2p.Host
 
 	// Incoming messages to process.
-	clientRxQueue *msgq.Queue
-	shardRxQueue  *msgq.Queue
-	globalRxQueue *msgq.Queue
+	clientRxQueue, shardRxQueue, globalRxQueue *msgq.Queue
 
 	// Service manager.
 	serviceManager *service.Manager
-
-	// Demo account.
-	DemoContractAddress      common.Address
-	LotteryManagerPrivateKey *ecdsa.PrivateKey
-
-	// Puzzle account.
-	PuzzleContractAddress   common.Address
-	PuzzleManagerPrivateKey *ecdsa.PrivateKey
-
-	// For test only; TODO ek – remove this
-	TestBankKeys []*ecdsa.PrivateKey
 
 	ContractDeployerKey          *ecdsa.PrivateKey
 	ContractDeployerCurrentNonce uint64 // The nonce of the deployer contract at current block
 	ContractAddresses            []common.Address
 
-	// For puzzle contracts
-	AddressNonce sync.Map
-
 	// Shard group Message Receiver
 	shardGroupReceiver p2p.GroupReceiver
-
 	// Global group Message Receiver, communicate with beacon chain, or cross-shard TX
 	globalGroupReceiver p2p.GroupReceiver
-
 	// Client Message Receiver to handle light client messages
 	// Beacon leader needs to use this receiver to talk to new node
 	clientReceiver p2p.GroupReceiver
-
 	// Duplicated Ping Message Received
 	duplicatedPing sync.Map
-
 	// Channel to notify consensus service to really start consensus
 	startConsensus chan struct{}
-
 	// node configuration, including group ID, shard ID, etc
 	NodeConfig *nodeconfig.ConfigType
-
 	// Chain configuration.
 	chainConfig params.ChainConfig
-
 	// map of service type to its message channel.
 	serviceMessageChan map[service.Type]chan *msg_pb.Message
+	isFirstTime        bool // the node was started with a fresh database
 
-	accountManager *accounts.Manager
-
-	isFirstTime bool // the node was started with a fresh database
-	// How long in second the leader needs to wait to propose a new block.
-	BlockPeriod time.Duration
-
-	// last time consensus reached for metrics
-	lastConsensusTime int64
 	// Last 1024 staking transaction error, only in memory
 	errorSink struct {
 		sync.Mutex
@@ -427,28 +388,14 @@ func (node *Node) startRxPipeline(
 
 // StartServer starts a server and process the requests by a handler.
 func (node *Node) StartServer() {
-
-	// client messages are sent by clients, like txgen, wallet
+	// client messages are for just spectators, like plain observers
 	node.startRxPipeline(node.clientReceiver, node.clientRxQueue, ClientRxWorkers)
-
-	// start the goroutine to receive group message
+	// start the goroutine to receive in my subcommittee messages
 	node.startRxPipeline(node.shardGroupReceiver, node.shardRxQueue, ShardRxWorkers)
-
-	// start the goroutine to receive global message, used for cross-shard TX
+	// start the goroutine to receive supercommittee level messages
 	// FIXME (leo): we use beacon client topic as the global topic for now
 	node.startRxPipeline(node.globalGroupReceiver, node.globalRxQueue, GlobalRxWorkers)
-
 	select {}
-}
-
-// Count the total number of transactions in the blockchain
-// Currently used for stats reporting purpose
-func (node *Node) countNumTransactionsInBlockchain() int {
-	count := 0
-	for block := node.Blockchain().CurrentBlock(); block != nil; block = node.Blockchain().GetBlockByHash(block.Header().ParentHash()) {
-		count += len(block.Transactions())
-	}
-	return count
 }
 
 // GetSyncID returns the syncID of this node
@@ -507,8 +454,15 @@ func New(
 		blockchain := node.Blockchain() // this also sets node.isFirstTime if the DB is fresh
 		beaconChain := node.Beaconchain()
 		if b1, b2 := beaconChain == nil, blockchain == nil; b1 || b2 {
+
+			shardID := node.NodeConfig.ShardID
+			// HACK get the real error reason
+			_, err := node.shardChains.ShardChain(shardID)
+
 			fmt.Fprintf(
-				os.Stderr, "beaconchain-is-nil:%t shardchain-is-nil:%t", b1, b2,
+				os.Stderr,
+				"reason:%s beaconchain-is-nil:%t shardchain-is-nil:%t",
+				err.Error(), b1, b2,
 			)
 			os.Exit(-1)
 		}
@@ -549,9 +503,7 @@ func New(
 
 		node.pendingCXReceipts = map[string]*types.CXReceiptsProof{}
 		node.Consensus.VerifiedNewBlock = make(chan *types.Block)
-		chain.Engine.SetRewarder(node.Consensus.Decider.(reward.Distributor))
 		chain.Engine.SetBeaconchain(beaconChain)
-
 		// the sequence number is the next block number to be added in consensus protocol, which is
 		// always one more than current chain header block
 		node.Consensus.SetBlockNum(blockchain.CurrentBlock().NumberU64() + 1)
@@ -561,14 +513,6 @@ func New(
 			if node.isFirstTime {
 				// Setup one time smart contracts
 				node.AddFaucetContractToPendingTransactions()
-			} else {
-				node.AddContractKeyAndAddress(scFaucet)
-			}
-			// Create test keys.  Genesis will later need this.
-			var err error
-			node.TestBankKeys, err = CreateTestBankKeys(TestAccountNumber)
-			if err != nil {
-				utils.Logger().Error().Err(err).Msg("Error while creating test keys")
 			}
 		}
 	}
@@ -588,33 +532,30 @@ func New(
 	// Broadcast double-signers reported by consensus
 	if node.Consensus != nil {
 		go func() {
-			for {
-				select {
-				case doubleSign := <-node.Consensus.SlashChan:
-					utils.Logger().Info().
-						RawJSON("double-sign-candidate", []byte(doubleSign.String())).
-						Msg("double sign notified by consensus leader")
-					// no point to broadcast the slash if we aren't even in the right epoch yet
-					if !node.Blockchain().Config().IsStaking(
-						node.Blockchain().CurrentHeader().Epoch(),
-					) {
-						return
+			for doubleSign := range node.Consensus.SlashChan {
+				utils.Logger().Info().
+					RawJSON("double-sign-candidate", []byte(doubleSign.String())).
+					Msg("double sign notified by consensus leader")
+				// no point to broadcast the slash if we aren't even in the right epoch yet
+				if !node.Blockchain().Config().IsStaking(
+					node.Blockchain().CurrentHeader().Epoch(),
+				) {
+					return
+				}
+				if hooks := node.NodeConfig.WebHooks.Hooks; hooks != nil {
+					if s := hooks.Slashing; s != nil {
+						url := s.OnNoticeDoubleSign
+						go func() { webhooks.DoPost(url, &doubleSign) }()
 					}
-					if hooks := node.NodeConfig.WebHooks.Hooks; hooks != nil {
-						if s := hooks.Slashing; s != nil {
-							url := s.OnNoticeDoubleSign
-							go func() { webhooks.DoPost(url, &doubleSign) }()
-						}
-					}
-					if node.NodeConfig.ShardID != shard.BeaconChainShardID {
-						go node.BroadcastSlash(&doubleSign)
-					} else {
-						records := slash.Records{doubleSign}
-						if err := node.Blockchain().AddPendingSlashingCandidates(
-							records,
-						); err != nil {
-							utils.Logger().Err(err).Msg("could not add new slash to ending slashes")
-						}
+				}
+				if node.NodeConfig.ShardID != shard.BeaconChainShardID {
+					go node.BroadcastSlash(&doubleSign)
+				} else {
+					records := slash.Records{doubleSign}
+					if err := node.Blockchain().AddPendingSlashingCandidates(
+						records,
+					); err != nil {
+						utils.Logger().Err(err).Msg("could not add new slash to ending slashes")
 					}
 				}
 			}
@@ -624,8 +565,9 @@ func New(
 	return &node
 }
 
-// InitConsensusWithValidators initialize shard state from latest epoch and update committee pub
-// keys for consensus and drand
+// InitConsensusWithValidators initialize shard state
+// from latest epoch and update committee pub
+// keys for consensus
 func (node *Node) InitConsensusWithValidators() (err error) {
 	if node.Consensus == nil {
 		utils.Logger().Error().
@@ -658,7 +600,7 @@ func (node *Node) InitConsensusWithValidators() (err error) {
 	if err != nil {
 		return err
 	}
-	pubKeys, err := committee.WithStakingEnabled.GetCommitteePublicKeys(subComm)
+	pubKeys, err := subComm.BLSPublicKeys()
 	if err != nil {
 		utils.Logger().Error().
 			Uint32("shardID", shardID).
@@ -681,9 +623,6 @@ func (node *Node) InitConsensusWithValidators() (err error) {
 			return nil
 		}
 	}
-	// TODO: Disable drand. Currently drand isn't
-	// functioning but we want to compeletely turn it off for full protection.
-	// node.DRand.UpdatePublicKeys(pubKeys)
 	return nil
 }
 
@@ -715,17 +654,14 @@ func (node *Node) AddBeaconPeer(p *p2p.Peer) bool {
 }
 
 // isBeacon = true if the node is beacon node
-// isClient = true if the node light client(wallet)
 func (node *Node) initNodeConfiguration() (service.NodeConfig, chan p2p.Peer) {
 	chanPeer := make(chan p2p.Peer)
 
 	nodeConfig := service.NodeConfig{
-		PushgatewayIP:   node.NodeConfig.GetPushgatewayIP(),
-		PushgatewayPort: node.NodeConfig.GetPushgatewayPort(),
-		IsClient:        node.NodeConfig.IsClient(),
-		Beacon:          nodeconfig.NewGroupIDByShardID(shard.BeaconChainShardID),
-		ShardGroupID:    node.NodeConfig.GetShardGroupID(),
-		Actions:         make(map[nodeconfig.GroupID]nodeconfig.ActionType),
+		IsClient:     node.NodeConfig.IsClient(),
+		Beacon:       nodeconfig.NewGroupIDByShardID(shard.BeaconChainShardID),
+		ShardGroupID: node.NodeConfig.GetShardGroupID(),
+		Actions:      make(map[nodeconfig.GroupID]nodeconfig.ActionType),
 	}
 
 	if nodeConfig.IsClient {
@@ -755,24 +691,9 @@ func (node *Node) initNodeConfiguration() (service.NodeConfig, chan p2p.Peer) {
 	return nodeConfig, chanPeer
 }
 
-// AccountManager ...
-func (node *Node) AccountManager() *accounts.Manager {
-	return node.accountManager
-}
-
 // ServiceManager ...
 func (node *Node) ServiceManager() *service.Manager {
 	return node.serviceManager
-}
-
-// SetSyncFreq sets the syncing frequency in the loop
-func (node *Node) SetSyncFreq(syncFreq int) {
-	node.syncFreq = syncFreq
-}
-
-// SetBeaconSyncFreq sets the syncing frequency in the loop
-func (node *Node) SetBeaconSyncFreq(syncFreq int) {
-	node.beaconSyncFreq = syncFreq
 }
 
 // ShutDown gracefully shut down the node server and dump the in-memory blockchain state into DB.

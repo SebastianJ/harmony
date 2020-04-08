@@ -8,7 +8,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/harmony-one/harmony/accounts"
 	"github.com/harmony-one/harmony/block"
 	"github.com/harmony-one/harmony/consensus/quorum"
 	"github.com/harmony-one/harmony/core"
@@ -19,6 +18,7 @@ import (
 	"github.com/harmony-one/harmony/internal/hmyapi/apiv2"
 	"github.com/harmony-one/harmony/internal/params"
 	"github.com/harmony-one/harmony/shard"
+	"github.com/harmony-one/harmony/shard/committee"
 	"github.com/harmony-one/harmony/staking/network"
 	staking "github.com/harmony-one/harmony/staking/types"
 )
@@ -30,17 +30,10 @@ import (
 type Backend interface {
 	// NOTE(ricl): this is not in ETH Backend inteface. They put it directly in eth object.
 	NetVersion() uint64
-	// General Ethereum API
-	// Downloader() *downloader.Downloader
 	ProtocolVersion() int
-	// SuggestPrice(ctx context.Context) (*big.Int, error)
 	ChainDb() ethdb.Database
 	EventMux() *event.TypeMux
-	AccountManager() *accounts.Manager
-	// ExtRPCEnabled() bool
 	RPCGasCap() *big.Int // global gas cap for hmy_call over rpc: DoS protection
-	// BlockChain API
-	// SetHead(number uint64)
 	HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*block.Header, error)
 	BlockByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Block, error)
 	StateAndHeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*state.DB, *block.Header, error)
@@ -69,27 +62,29 @@ type Backend interface {
 	GetShardID() uint32
 	// Get transactions history for an address
 	GetTransactionsHistory(address, txType, order string) ([]common.Hash, error)
+	// Get staking transactions history for an address
+	GetStakingTransactionsHistory(address, txType, order string) ([]common.Hash, error)
 	// retrieve the blockHash using txID and add blockHash to CxPool for resending
 	ResendCx(ctx context.Context, txID common.Hash) (uint64, bool)
 	IsLeader() bool
 	SendStakingTx(ctx context.Context, newStakingTx *staking.StakingTransaction) error
 	GetElectedValidatorAddresses() []common.Address
 	GetAllValidatorAddresses() []common.Address
-	GetValidatorInformation(addr common.Address) (*staking.ValidatorRPCEnchanced, error)
-	GetValidatorStats(addr common.Address) *staking.ValidatorStats
+	GetValidatorInformation(addr common.Address, block *types.Block) (*staking.ValidatorRPCEnchanced, error)
 	GetDelegationsByValidator(validator common.Address) []*staking.Delegation
 	GetDelegationsByDelegator(delegator common.Address) ([]common.Address, []*staking.Delegation)
 	GetValidatorSelfDelegation(addr common.Address) *big.Int
 	GetShardState() (*shard.State, error)
 	GetCurrentStakingErrorSink() []staking.RPCTransactionError
 	GetCurrentTransactionErrorSink() []types.RPCTransactionError
-	GetMedianRawStakeSnapshot() (*big.Int, error)
+	GetMedianRawStakeSnapshot() (*committee.CompletedEPoSRound, error)
 	GetPendingCXReceipts() []*types.CXReceiptsProof
 	GetCurrentUtilityMetrics() (*network.UtilityMetric, error)
 	GetSuperCommittees() (*quorum.Transition, error)
 	GetTotalStakingSnapshot() *big.Int
 	GetCurrentBadBlocks() []core.BadBlock
-	GetLastCrossLinks() ([]*types.RPCCrossLink, error)
+	GetLastCrossLinks() ([]*types.CrossLink, error)
+	GetLatestChainHeaders() *block.HeaderPair
 }
 
 // GetAPIs returns all the APIs.
@@ -118,12 +113,6 @@ func GetAPIs(b Backend) []rpc.API {
 		{
 			Namespace: "hmy",
 			Version:   "1.0",
-			Service:   apiv1.NewPublicAccountAPI(b.AccountManager()),
-			Public:    true,
-		},
-		{
-			Namespace: "hmy",
-			Version:   "1.0",
 			Service:   apiv1.NewDebugAPI(b),
 			Public:    true, // FIXME: change to false once IPC implemented
 		},
@@ -143,12 +132,6 @@ func GetAPIs(b Backend) []rpc.API {
 			Namespace: "hmyv2",
 			Version:   "1.0",
 			Service:   apiv2.NewPublicTransactionPoolAPI(b, nonceLockV2),
-			Public:    true,
-		},
-		{
-			Namespace: "hmyv2",
-			Version:   "1.0",
-			Service:   apiv2.NewPublicAccountAPI(b.AccountManager()),
 			Public:    true,
 		},
 		{
