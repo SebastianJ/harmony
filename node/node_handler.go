@@ -7,17 +7,15 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/harmony-one/harmony/consensus"
-
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/harmony-one/bls/ffi/go/bls"
 	"github.com/harmony-one/harmony/api/proto"
 	proto_discovery "github.com/harmony-one/harmony/api/proto/discovery"
 	proto_node "github.com/harmony-one/harmony/api/proto/node"
 	"github.com/harmony-one/harmony/block"
+	"github.com/harmony-one/harmony/consensus"
 	"github.com/harmony-one/harmony/core/types"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
-	"github.com/harmony-one/harmony/internal/ctxerror"
 	"github.com/harmony-one/harmony/internal/utils"
 	"github.com/harmony-one/harmony/msgq"
 	"github.com/harmony-one/harmony/p2p"
@@ -28,6 +26,7 @@ import (
 	staking "github.com/harmony-one/harmony/staking/types"
 	"github.com/harmony-one/harmony/webhooks"
 	libp2p_peer "github.com/libp2p/go-libp2p-core/peer"
+	"github.com/pkg/errors"
 )
 
 const p2pMsgPrefixSize = 5
@@ -331,11 +330,7 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 			Str("blockHash", newBlock.Hash().Hex()).
 			Err(err).
 			Msg("[VerifyNewBlock] Cannot validate header for the new block")
-		return ctxerror.New(
-			"[VerifyNewBlock] Cannot validate header for the new block",
-			"blockHash",
-			newBlock.Hash(),
-		).WithCause(err)
+		return err
 	}
 
 	if newBlock.ShardID() != node.Blockchain().ShardID() {
@@ -343,10 +338,7 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 			Uint32("my shard ID", node.Blockchain().ShardID()).
 			Uint32("new block's shard ID", newBlock.ShardID()).
 			Msg("[VerifyNewBlock] Wrong shard ID of the new block")
-		return ctxerror.New("[VerifyNewBlock] Wrong shard ID of the new block",
-			"my shard ID", node.Blockchain().ShardID(),
-			"new block's shard ID", newBlock.ShardID(),
-		)
+		return errors.New("[VerifyNewBlock] Wrong shard ID of the new block")
 	}
 
 	if err := node.Blockchain().Engine().VerifyShardState(
@@ -356,10 +348,9 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 			Str("blockHash", newBlock.Hash().Hex()).
 			Err(err).
 			Msg("[VerifyNewBlock] Cannot verify shard state for the new block")
-		return ctxerror.New(
-			"[VerifyNewBlock] Cannot verify shard state for the new block", "blockHash",
-			newBlock.Hash(),
-		).WithCause(err)
+		return errors.New(
+			"[VerifyNewBlock] Cannot verify shard state for the new block",
+		)
 	}
 
 	if err := node.Blockchain().ValidateNewBlock(newBlock); err != nil {
@@ -380,10 +371,11 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 			Int("numStakingTx", len(newBlock.StakingTransactions())).
 			Err(err).
 			Msg("[VerifyNewBlock] Cannot Verify New Block!!!")
-		return ctxerror.New("[VerifyNewBlock] Cannot Verify New Block!!!",
-			"blockHash", newBlock.Hash(),
-			"numTx", len(newBlock.Transactions()),
-		).WithCause(err)
+		return errors.Errorf(
+			"[VerifyNewBlock] Cannot Verify New Block!!! block-hash %s txn-count %d",
+			newBlock.Hash().Hex(),
+			len(newBlock.Transactions()),
+		)
 	}
 
 	// Verify cross links
@@ -403,8 +395,9 @@ func (node *Node) VerifyNewBlock(newBlock *types.Block) error {
 			Int("numIncomingReceipts", len(newBlock.IncomingReceipts())).
 			Err(err).
 			Msg("[VerifyNewBlock] Cannot ValidateNewBlock")
-		return ctxerror.New("[VerifyNewBlock] Cannot ValidateNewBlock", "blockHash", newBlock.Hash(),
-			"numIncomingReceipts", len(newBlock.IncomingReceipts())).WithCause(err)
+		return errors.Wrapf(
+			err, "[VerifyNewBlock] Cannot ValidateNewBlock",
+		)
 	}
 	return nil
 }
