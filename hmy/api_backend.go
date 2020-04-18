@@ -129,11 +129,17 @@ func (b *APIBackend) GetReceipts(ctx context.Context, hash common.Hash) (types.R
 // TODO: this is not implemented or verified yet for harmony.
 func (b *APIBackend) EventMux() *event.TypeMux { return b.hmy.eventMux }
 
+const (
+	// BloomBitsBlocks is the number of blocks a single bloom bit section vector
+	// contains on the server side.
+	BloomBitsBlocks uint64 = 4096
+)
+
 // BloomStatus ...
 // TODO: this is not implemented or verified yet for harmony.
 func (b *APIBackend) BloomStatus() (uint64, uint64) {
 	sections, _, _ := b.hmy.bloomIndexer.Sections()
-	return params.BloomBitsBlocks, sections
+	return BloomBitsBlocks, sections
 }
 
 // ProtocolVersion ...
@@ -400,7 +406,7 @@ func (b *APIBackend) GetValidatorInformation(
 	}
 
 	computed := availability.ComputeCurrentSigning(
-		snapshot, wrapper,
+		snapshot.Validator, wrapper,
 	)
 	beaconChainBlocks := uint64(
 		b.hmy.BeaconChain().CurrentBlock().Header().Number().Int64(),
@@ -464,7 +470,7 @@ func (b *APIBackend) GetTotalStakingSnapshot() *big.Int {
 		snapshot, _ := b.hmy.BlockChain().ReadValidatorSnapshot(candidates[i])
 		validator, _ := b.hmy.BlockChain().ReadValidatorInformation(candidates[i])
 		if !committee.IsEligibleForEPoSAuction(
-			snapshot, validator, b.hmy.BlockChain().CurrentBlock().Epoch(),
+			snapshot, validator,
 		) {
 			continue
 		}

@@ -69,7 +69,7 @@ type ValidatorSnapshotReader interface {
 	ReadValidatorSnapshotAtEpoch(
 		epoch *big.Int,
 		addr common.Address,
-	) (*ValidatorWrapper, error)
+	) (*ValidatorSnapshot, error)
 }
 
 type counters struct {
@@ -91,12 +91,18 @@ type ValidatorWrapper struct {
 	BlockReward *big.Int `json:"-"`
 }
 
+// ValidatorSnapshot contains validator snapshot and the corresponding epoch
+type ValidatorSnapshot struct {
+	Validator *ValidatorWrapper
+	Epoch     *big.Int
+}
+
 // Computed represents current epoch
 // availability measures, mostly for RPC
 type Computed struct {
 	Signed            *big.Int    `json:"current-epoch-signed"`
 	ToSign            *big.Int    `json:"current-epoch-to-sign"`
-	BlocksLeftInEpoch uint64      `json:"num-beacon-blocks-until-next-epoch"`
+	BlocksLeftInEpoch uint64      `json:"-"`
 	Percentage        numeric.Dec `json:"current-epoch-signing-percentage"`
 	IsBelowThreshold  bool        `json:"-"`
 }
