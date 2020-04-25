@@ -47,6 +47,7 @@ var (
 	bloomBitsPrefix              = []byte("B")  // bloomBitsPrefix + bit (uint16 big endian) + section (uint64 big endian) + hash -> bloom bits
 	shardStatePrefix             = []byte("ss") // shardStatePrefix + num (uint64 big endian) + hash -> shardState
 	lastCommitsKey               = []byte("LastCommits")
+	blockCommitSigPrefix         = []byte("block-sig-")
 	pendingCrosslinkKey          = []byte("pendingCL")        // prefix for shard last pending crosslink
 	pendingSlashingKey           = []byte("pendingSC")        // prefix for shard last pending slashing record
 	preimagePrefix               = []byte("secure-key-")      // preimagePrefix + hash -> preimage
@@ -54,12 +55,11 @@ var (
 	crosslinkPrefix              = []byte("cl")               // prefix for crosslink
 	delegatorValidatorListPrefix = []byte("dvl")              // prefix for delegator's validator list
 	// TODO: shorten the key prefix so we don't waste db space
-	cxReceiptPrefix         = []byte("cxReceipt")              // prefix for cross shard transaction receipt
-	cxReceiptSpentPrefix    = []byte("cxReceiptSpent")         // prefix for indicator of unspent of cxReceiptsProof
-	validatorSnapshotPrefix = []byte("validator-snapshot")     // prefix for staking validator's snapshot information
-	validatorStatsPrefix    = []byte("validator-stats")        // prefix for staking validator's stats information
-	validatorListKey        = []byte("validator-list")         // key for all validators list
-	electedValidatorListKey = []byte("elected-validator-list") // key for elected validators list
+	cxReceiptPrefix         = []byte("cxReceipt")          // prefix for cross shard transaction receipt
+	cxReceiptSpentPrefix    = []byte("cxReceiptSpent")     // prefix for indicator of unspent of cxReceiptsProof
+	validatorSnapshotPrefix = []byte("validator-snapshot") // prefix for staking validator's snapshot information
+	validatorStatsPrefix    = []byte("validator-stats")    // prefix for staking validator's stats information
+	validatorListKey        = []byte("validator-list")     // key for all validators list
 	// epochBlockNumberPrefix + epoch (big.Int.Bytes())
 	// -> epoch block number (big.Int.Bytes())
 	epochBlockNumberPrefix = []byte("harmony-epoch-block-number")
@@ -217,4 +217,8 @@ func validatorStatsKey(addr common.Address) []byte {
 
 func blockRewardAccumKey(number uint64) []byte {
 	return append(currentRewardGivenOutPrefix, encodeBlockNumber(number)...)
+}
+
+func blockCommitSigKey(number uint64) []byte {
+	return append(blockCommitSigPrefix, encodeBlockNumber(number)...)
 }

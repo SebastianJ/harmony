@@ -42,29 +42,6 @@ func WriteShardStateBytes(db DatabaseWriter, epoch *big.Int, data []byte) error 
 	return nil
 }
 
-// ReadLastCommits retrieves the commit signatures on the current block of blockchain.
-func ReadLastCommits(db DatabaseReader) ([]byte, error) {
-	var data []byte
-	data, err := db.Get(lastCommitsKey)
-	if err != nil {
-		return nil, errors.New("cannot read last commits from rawdb")
-	}
-	return data, nil
-}
-
-// WriteLastCommits stores the commit signatures collected on the newly confirmed block into database.
-func WriteLastCommits(
-	db DatabaseWriter, data []byte,
-) (err error) {
-	if err = db.Put(lastCommitsKey, data); err != nil {
-		return errors.New("cannot write last commits")
-	}
-	utils.Logger().Info().
-		Int("size", len(data)).
-		Msg("wrote last commits")
-	return nil
-}
-
 // ReadCrossLinkShardBlock retrieves the blockHash given shardID and blockNum
 func ReadCrossLinkShardBlock(
 	db DatabaseReader, shardID uint32, blockNum uint64,
@@ -171,7 +148,7 @@ func DeleteCXReceiptsProofSpent(db DatabaseDeleter, shardID uint32, number uint6
 // ReadValidatorSnapshot retrieves validator's snapshot by its address
 func ReadValidatorSnapshot(
 	db DatabaseReader, addr common.Address, epoch *big.Int,
-) (*staking.ValidatorWrapper, error) {
+) (*staking.ValidatorSnapshot, error) {
 	data, err := db.Get(validatorSnapshotKey(addr, epoch))
 	if err != nil || len(data) == 0 {
 		utils.Logger().Info().Err(err).Msg("ReadValidatorSnapshot")
@@ -184,7 +161,8 @@ func ReadValidatorSnapshot(
 			Msg("Unable to decode validator snapshot from database")
 		return nil, err
 	}
-	return &v, nil
+	s := staking.ValidatorSnapshot{&v, epoch}
+	return &s, nil
 }
 
 // WriteValidatorSnapshot stores validator's snapshot by its address
@@ -246,13 +224,9 @@ func WriteValidatorStats(
 	return err
 }
 
-// ReadValidatorList retrieves staking validator by its address
-// Return only elected validators if electedOnly==true, otherwise, return all validators
-func ReadValidatorList(db DatabaseReader, electedOnly bool) ([]common.Address, error) {
+// ReadValidatorList retrieves all staking validators by its address
+func ReadValidatorList(db DatabaseReader) ([]common.Address, error) {
 	key := validatorListKey
-	if electedOnly {
-		key = electedValidatorListKey
-	}
 	data, err := db.Get(key)
 	if err != nil || len(data) == 0 {
 		return []common.Address{}, nil
@@ -265,16 +239,11 @@ func ReadValidatorList(db DatabaseReader, electedOnly bool) ([]common.Address, e
 	return addrs, nil
 }
 
-// WriteValidatorList stores staking validator's information by its address
-// Writes only for elected validators
-// if electedOnly==true, otherwise, writes for all validators
+// WriteValidatorList stores all staking validators by its address
 func WriteValidatorList(
-	db DatabaseWriter, addrs []common.Address, electedOnly bool,
+	db DatabaseWriter, addrs []common.Address,
 ) error {
 	key := validatorListKey
-	if electedOnly {
-		key = electedValidatorListKey
-	}
 
 	bytes, err := rlp.EncodeToBytes(addrs)
 	if err != nil {
@@ -321,6 +290,26 @@ func ReadBlockRewardAccumulator(db DatabaseReader, number uint64) (*big.Int, err
 // WriteBlockRewardAccumulator ..
 func WriteBlockRewardAccumulator(db DatabaseWriter, newAccum *big.Int, number uint64) error {
 	return db.Put(blockRewardAccumKey(number), newAccum.Bytes())
+}
+
+// ReadBlockCommitSig retrieves the signature signed on a block.
+func ReadBlockCommitSig(db DatabaseReader, blockNum uint64) ([]byte, error) {
+	var data []byte
+	data, err := db.Get(blockCommitSigKey(blockNum))
+	if err != nil {
+		// TODO: remove this extra seeking of sig after the mainnet is fully upgraded.
+		//       this is only needed for the compatibility in the migration moment.
+		data, err = db.Get(lastCommitsKey)
+		if err != nil {
+			return nil, errors.New("cannot read commit sig for block " + string(blockNum))
+		}
+	}
+	return data, nil
+}
+
+// WriteBlockCommitSig ..
+func WriteBlockCommitSig(db DatabaseWriter, blockNum uint64, sigAndBitmap []byte) error {
+	return db.Put(blockCommitSigKey(blockNum), sigAndBitmap)
 }
 
 //// Resharding ////

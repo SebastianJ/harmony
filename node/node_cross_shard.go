@@ -8,25 +8,25 @@ import (
 	"github.com/harmony-one/harmony/core/types"
 	nodeconfig "github.com/harmony-one/harmony/internal/configs/node"
 	"github.com/harmony-one/harmony/internal/utils"
-	"github.com/harmony-one/harmony/p2p/host"
+	"github.com/harmony-one/harmony/p2p"
 	"github.com/harmony-one/harmony/shard"
 	"github.com/pkg/errors"
 )
 
 // BroadcastCXReceipts broadcasts cross shard receipts to correspoding
 // destination shards
-func (node *Node) BroadcastCXReceipts(newBlock *types.Block, lastCommits []byte) {
-
+func (node *Node) BroadcastCXReceipts(newBlock *types.Block) {
+	commitSigAndBitmap := newBlock.GetCurrentCommitSig()
 	//#### Read payload data from committed msg
-	if len(lastCommits) <= 96 {
-		utils.Logger().Debug().Int("lastCommitsLen", len(lastCommits)).Msg("[BroadcastCXReceipts] lastCommits Not Enough Length")
+	if len(commitSigAndBitmap) <= 96 {
+		utils.Logger().Debug().Int("commitSigAndBitmapLen", len(commitSigAndBitmap)).Msg("[BroadcastCXReceipts] commitSigAndBitmap Not Enough Length")
 	}
 	commitSig := make([]byte, 96)
-	commitBitmap := make([]byte, len(lastCommits)-96)
+	commitBitmap := make([]byte, len(commitSigAndBitmap)-96)
 	offset := 0
-	copy(commitSig[:], lastCommits[offset:offset+96])
+	copy(commitSig[:], commitSigAndBitmap[offset:offset+96])
 	offset += 96
-	copy(commitBitmap[:], lastCommits[offset:])
+	copy(commitBitmap[:], commitSigAndBitmap[offset:])
 	//#### END Read payload data from committed msg
 
 	epoch := newBlock.Header().Epoch()
@@ -62,7 +62,9 @@ func (node *Node) BroadcastCXReceiptsWithShardID(block *types.Block, commitSig [
 
 	merkleProof, err := node.Blockchain().CXMerkleProof(toShardID, block)
 	if err != nil {
-		utils.Logger().Warn().Uint32("ToShardID", toShardID).Msg("[BroadcastCXReceiptsWithShardID] Unable to get merkleProof")
+		utils.Logger().Warn().
+			Uint32("ToShardID", toShardID).
+			Msg("[BroadcastCXReceiptsWithShardID] Unable to get merkleProof")
 		return
 	}
 
@@ -75,9 +77,14 @@ func (node *Node) BroadcastCXReceiptsWithShardID(block *types.Block, commitSig [
 	}
 
 	groupID := nodeconfig.NewGroupIDByShardID(nodeconfig.ShardID(toShardID))
-	utils.Logger().Info().Uint32("ToShardID", toShardID).Str("GroupID", string(groupID)).Interface("cxp", cxReceiptsProof).Msg("[BroadcastCXReceiptsWithShardID] ReadCXReceipts and MerkleProof ready. Sending CX receipts...")
+	utils.Logger().Info().Uint32("ToShardID", toShardID).
+		Str("GroupID", string(groupID)).
+		Interface("cxp", cxReceiptsProof).
+		Msg("[BroadcastCXReceiptsWithShardID] ReadCXReceipts and MerkleProof ready. Sending CX receipts...")
 	// TODO ek – limit concurrency
-	go node.host.SendMessageToGroups([]nodeconfig.GroupID{groupID}, host.ConstructP2pMessage(byte(0), proto_node.ConstructCXReceiptsProof(cxReceiptsProof)))
+	go node.host.SendMessageToGroups([]nodeconfig.GroupID{groupID},
+		p2p.ConstructMessage(proto_node.ConstructCXReceiptsProof(cxReceiptsProof)),
+	)
 }
 
 // BroadcastMissingCXReceipts broadcasts missing cross shard receipts per request
