@@ -148,7 +148,7 @@ type BlockChain struct {
 	lastCommitsCache              *lru.Cache
 	epochCache                    *lru.Cache    // Cache epoch number → first block number
 	randomnessCache               *lru.Cache    // Cache for vrf/vdf
-	validatorCache                *lru.Cache    // Cache for validator info
+	validatorSnapshotCache        *lru.Cache    // Cache for validator snapshot
 	validatorStatsCache           *lru.Cache    // Cache for validator stats
 	validatorListCache            *lru.Cache    // Cache of validator list
 	validatorListByDelegatorCache *lru.Cache    // Cache of validator list by delegator
@@ -217,7 +217,7 @@ func NewBlockChain(
 		lastCommitsCache:              commitsCache,
 		epochCache:                    epochCache,
 		randomnessCache:               randomnessCache,
-		validatorCache:                validatorCache,
+		validatorSnapshotCache:        validatorCache,
 		validatorStatsCache:           validatorStatsCache,
 		validatorListCache:            validatorListCache,
 		validatorListByDelegatorCache: validatorListByDelegatorCache,
@@ -548,7 +548,7 @@ func (bc *BlockChain) repair(head **types.Block) error {
 		// Repair last commit sigs
 		lastSig := (*head).Header().LastCommitSignature()
 		sigAndBitMap := append(lastSig[:], (*head).Header().LastCommitBitmap()...)
-		bc.WriteLastCommits(sigAndBitMap)
+		bc.WriteCommitSig((*head).NumberU64()-1, sigAndBitMap)
 
 		// Otherwise rewind one block and recheck state availability there
 		(*head) = bc.GetBlock((*head).ParentHash(), (*head).NumberU64()-1)
@@ -1708,26 +1708,26 @@ func (bc *BlockChain) WriteShardStateBytes(db rawdb.DatabaseWriter,
 	return decodeShardState, nil
 }
 
-// ReadLastCommits retrieves last commits.
-func (bc *BlockChain) ReadLastCommits() ([]byte, error) {
-	if cached, ok := bc.lastCommitsCache.Get("lastCommits"); ok {
+// ReadCommitSig retrieves the commit signature on a block.
+func (bc *BlockChain) ReadCommitSig(blockNum uint64) ([]byte, error) {
+	if cached, ok := bc.lastCommitsCache.Get("commitSig" + string(blockNum)); ok {
 		lastCommits := cached.([]byte)
 		return lastCommits, nil
 	}
-	lastCommits, err := rawdb.ReadLastCommits(bc.db)
+	lastCommits, err := rawdb.ReadBlockCommitSig(bc.db, blockNum)
 	if err != nil {
 		return nil, err
 	}
 	return lastCommits, nil
 }
 
-// WriteLastCommits saves the commits of last block.
-func (bc *BlockChain) WriteLastCommits(lastCommits []byte) error {
-	err := rawdb.WriteLastCommits(bc.db, lastCommits)
+// WriteCommitSig saves the commits signatures signed on a block.
+func (bc *BlockChain) WriteCommitSig(blockNum uint64, lastCommits []byte) error {
+	err := rawdb.WriteBlockCommitSig(bc.db, blockNum, lastCommits)
 	if err != nil {
 		return err
 	}
-	bc.lastCommitsCache.Add("lastCommits", lastCommits)
+	bc.lastCommitsCache.Add("commitSig"+string(blockNum), lastCommits)
 	return nil
 }
 
@@ -2196,48 +2196,25 @@ func (bc *BlockChain) ReadValidatorSnapshot(
 	addr common.Address,
 ) (*staking.ValidatorSnapshot, error) {
 	epoch := bc.CurrentBlock().Epoch()
-	if cached, ok := bc.validatorCache.Get("validator-snapshot-" + string(addr.Bytes()) + epoch.String()); ok {
-		by := cached.([]byte)
-		v := staking.ValidatorWrapper{}
-		if err := rlp.DecodeBytes(by, &v); err != nil {
-			return nil, err
-		}
-		s := staking.ValidatorSnapshot{&v, epoch}
-		return &s, nil
+	key := addr.Hex() + epoch.String()
+	if cached, ok := bc.validatorSnapshotCache.Get(key); ok {
+		return cached.(*staking.ValidatorSnapshot), nil
 	}
 	return rawdb.ReadValidatorSnapshot(bc.db, addr, epoch)
 }
 
-// writeValidatorSnapshots writes the snapshot of provided list of validators
-func (bc *BlockChain) writeValidatorSnapshots(
-	batch rawdb.DatabaseWriter, addrs []common.Address, epoch *big.Int, state *state.DB,
+// WriteValidatorSnapshot writes the snapshot of provided validator
+func (bc *BlockChain) WriteValidatorSnapshot(
+	batch rawdb.DatabaseWriter, snapshot *staking.ValidatorSnapshot,
 ) error {
-	// Read all validator's current data
-	validators := []*staking.ValidatorWrapper{}
-	for i := range addrs {
-		// The snapshot will be captured in the state after the last epoch block is finalized
-		validator, err := state.ValidatorWrapper(addrs[i])
-		if err != nil {
-			return err
-		}
-		validators = append(validators, validator)
-	}
-
 	// Batch write the current data as snapshot
-	for i := range validators {
-		if err := rawdb.WriteValidatorSnapshot(batch, validators[i], epoch); err != nil {
-			return err
-		}
+	if err := rawdb.WriteValidatorSnapshot(batch, snapshot.Validator, snapshot.Epoch); err != nil {
+		return err
 	}
 
 	// Update cache
-	for i := range validators {
-		by, err := rlp.EncodeToBytes(validators[i])
-		if err == nil {
-			key := "validator-snapshot-" + string(validators[i].Address.Bytes()) + epoch.String()
-			bc.validatorCache.Add(key, by)
-		}
-	}
+	key := snapshot.Validator.Address.Hex() + snapshot.Epoch.String()
+	bc.validatorSnapshotCache.Add(key, snapshot)
 	return nil
 }
 
@@ -2381,7 +2358,21 @@ func (bc *BlockChain) UpdateValidatorSnapshots(
 
 	allValidators = append(allValidators, newValidators...)
 
-	return bc.writeValidatorSnapshots(batch, allValidators, epoch, state)
+	// Read all validator's current data and snapshot them
+	for i := range allValidators {
+		// The snapshot will be captured in the state after the last epoch block is finalized
+		validator, err := state.ValidatorWrapper(allValidators[i])
+		if err != nil {
+			return err
+		}
+
+		snapshot := &staking.ValidatorSnapshot{validator, epoch}
+		if err := bc.WriteValidatorSnapshot(batch, snapshot); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // ReadValidatorList reads the addresses of current all validators
@@ -2494,13 +2485,13 @@ func (bc *BlockChain) UpdateStakingMetaData(
 				return newValidators, err
 			}
 
-			if err := rawdb.WriteValidatorSnapshot(batch, validator, epoch); err != nil {
+			if err := bc.WriteValidatorSnapshot(batch, &staking.ValidatorSnapshot{validator, epoch}); err != nil {
 				return newValidators, err
 			}
 			// For validator created at exactly the last block of an epoch, we should create the snapshot
 			// for next epoch too.
 			if newEpoch.Cmp(epoch) > 0 {
-				if err := rawdb.WriteValidatorSnapshot(batch, validator, newEpoch); err != nil {
+				if err := bc.WriteValidatorSnapshot(batch, &staking.ValidatorSnapshot{validator, newEpoch}); err != nil {
 					return newValidators, err
 				}
 			}

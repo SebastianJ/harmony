@@ -2,7 +2,6 @@ package chain
 
 import (
 	"bytes"
-	"encoding/binary"
 	"math/big"
 	"sort"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/harmony-one/harmony/consensus/engine"
 	"github.com/harmony-one/harmony/consensus/quorum"
 	"github.com/harmony-one/harmony/consensus/reward"
+	"github.com/harmony-one/harmony/consensus/signature"
 	"github.com/harmony-one/harmony/core/state"
 	"github.com/harmony-one/harmony/core/types"
 	"github.com/harmony-one/harmony/internal/utils"
@@ -227,10 +227,8 @@ func (e *engineImpl) VerifySeal(chain engine.ChainReader, header *block.Header) 
 		}
 	}
 
-	// TODO(audit): verify signature on hash+blockNum+viewID (add a hard fork)
-	blockNumHash := make([]byte, 8)
-	binary.LittleEndian.PutUint64(blockNumHash, header.Number().Uint64()-1)
-	lastCommitPayload := append(blockNumHash, parentHash[:]...)
+	lastCommitPayload := signature.ConstructCommitPayload(chain,
+		parentHeader.Epoch(), parentHeader.Hash(), parentHeader.Number().Uint64(), parentHeader.ViewID().Uint64())
 	if !aggSig.VerifyHash(mask.AggregatePublic, lastCommitPayload) {
 		const msg = "[VerifySeal] Unable to verify aggregated signature from last block"
 		return errors.New(msg)
@@ -336,12 +334,6 @@ func payoutUndelegations(
 			state.AddBalance(delegation.DelegatorAddress, totalWithdraw)
 		}
 		countTrack[validator] = len(wrapper.Delegations)
-		if err := state.UpdateValidatorWrapper(
-			validator, wrapper,
-		); err != nil {
-			const msg = "[Finalize] failed update validator info"
-			return errors.New(msg)
-		}
 	}
 
 	utils.Logger().Info().
@@ -367,12 +359,6 @@ func setLastEpochInCommittee(header *block.Header, state *state.DB) error {
 			)
 		}
 		wrapper.LastEpochInCommittee = newShardState.Epoch
-		if err := state.UpdateValidatorWrapper(
-			addr, wrapper,
-		); err != nil {
-			const msg = "[Finalize] failed update validator info"
-			return errors.New(msg)
-		}
 	}
 	return nil
 }
@@ -517,7 +503,6 @@ func (e *engineImpl) VerifyHeaderWithSignature(chain engine.ChainReader, header 
 			"[VerifyHeaderWithSignature] Unable to deserialize signatures",
 		)
 	}
-	hash := header.Hash()
 
 	if e := header.Epoch(); chain.Config().IsStaking(e) {
 		slotList, err := chain.ReadShardState(e)
@@ -555,10 +540,8 @@ func (e *engineImpl) VerifyHeaderWithSignature(chain engine.ChainReader, header 
 			)
 		}
 	}
-	// TODO(audit): verify signature on hash+blockNum+viewID (add a hard fork)
-	blockNumHash := make([]byte, 8)
-	binary.LittleEndian.PutUint64(blockNumHash, header.Number().Uint64())
-	commitPayload := append(blockNumHash, hash[:]...)
+	commitPayload := signature.ConstructCommitPayload(chain,
+		header.Epoch(), header.Hash(), header.Number().Uint64(), header.ViewID().Uint64())
 
 	if !aggSig.VerifyHash(mask.AggregatePublic, commitPayload) {
 		return errors.New("[VerifySeal] Unable to verify aggregated signature for block")
