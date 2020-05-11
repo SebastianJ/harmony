@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/gob"
 	"fmt"
 	"log"
 
@@ -120,6 +121,28 @@ var (
 	crossLinkH       = []byte{nodeB, blockB, crossLinkB}
 	cxReceiptH       = []byte{nodeB, blockB, receiptB}
 )
+
+// SerializeBlockchainSyncMessage serializes BlockchainSyncMessage.
+func SerializeBlockchainSyncMessage(blockchainSyncMessage *BlockchainSyncMessage) []byte {
+	var result bytes.Buffer
+	encoder := gob.NewEncoder(&result)
+	err := encoder.Encode(blockchainSyncMessage)
+	if err != nil {
+		utils.Logger().Error().Err(err).Msg("Failed to serialize blockchain sync message")
+	}
+	return result.Bytes()
+}
+
+// DeserializeBlockchainSyncMessage deserializes BlockchainSyncMessage.
+func DeserializeBlockchainSyncMessage(d []byte) (*BlockchainSyncMessage, error) {
+	var blockchainSyncMessage BlockchainSyncMessage
+	decoder := gob.NewDecoder(bytes.NewReader(d))
+	err := decoder.Decode(&blockchainSyncMessage)
+	if err != nil {
+		utils.Logger().Error().Err(err).Msg("Failed to deserialize blockchain sync message")
+	}
+	return &blockchainSyncMessage, err
+}
 
 // ConstructTransactionListMessageAccount constructs serialized transactions in account model
 func ConstructTransactionListMessageAccount(transactions types.Transactions) []byte {
